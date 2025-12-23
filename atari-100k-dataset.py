@@ -14,7 +14,7 @@ while not episode_over:
     obs, reward, terminated, truncated, info = env.step(action)
 
     # print(f'Observation shape: {obs.shape}')
-    # plot_atari_frame(obs)
+    plot_atari_frame(obs)
 
     episode_over = terminated or truncated
     break
