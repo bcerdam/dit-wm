@@ -1,26 +1,45 @@
-from diffusers.models import AutoencoderKL
 import torch
-from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
+from PIL import Image
 
-model = "CompVis/stable-diffusion-v1-4"
-vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse")
 
-with torch.no_grad():
-    img = Image.open('test.jpeg').resize(size=(64, 64))
+'''
+encode_observation(): Recieves pixel space observation and encodes it to latent space.
 
-    img_tensor = torch.tensor(np.array(img)).float().permute(2, 0, 1).unsqueeze(0)
-    img_tensor = (img_tensor / 127.5) - 1.0
-    # print(img_tensor.shape)
-    latent = vae.encode(img_tensor)
-    # print(latent.latent_dist.sample().shape)
+observation: Atari enviroment pixel space observation
+vae: Off the shelf VAE
+data_collection: Bool that indicates wether we are collecting data or not
+'''
+def encode_observation(observation, vae, data_collection=True, device='cuda'):
+    
+    with torch.no_grad():
+        pil_image_resized = Image.fromarray(observation).resize(size=(64, 64))
+        observation_tensor = torch.tensor(np.array(pil_image_resized)).float().permute(2, 0, 1).unsqueeze(0).to(device)
+        observation_tensor_normalized = (observation_tensor / 127.5) - 1.0
+        observation_latent = vae.encode(observation_tensor_normalized).latent_dist.sample() * 0.18215
 
-    decoded_latent = vae.decode(latent.latent_dist.sample())['sample']
-    decoded_latent = (decoded_latent / 2 + 0.5).clamp(0, 1)
-    # print(decoded_latent.shape)
+        if data_collection == True:
+            return observation_latent.cpu().numpy()
+        else:
+            return observation_latent
+    
 
-    img_decoded_latent = decoded_latent.squeeze(0).permute(1, 2, 0).numpy()
-    print(img_decoded_latent.shape)
+'''
+decode_latent(): Recieves latent space observation, and decodes it into pixel space.
 
-    plt.imsave('test_1.jpeg', img_decoded_latent, dpi=500)
+latent: Encoded observation from Atari enviroment
+vae: Off the shelf VAE
+'''
+def decode_latent(latent, vae, device='cuda'):
+    latent = torch.tensor(latent).to(device)
+    with torch.no_grad():
+        decoded_latent = vae.decode(latent/ 0.18215).sample
+        decoded_latent = (decoded_latent / 2 + 0.5).clamp(0, 1)
+        img_decoded_latent = decoded_latent.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        return (img_decoded_latent*255).astype(np.uint8)      
+
+
+
+
+
