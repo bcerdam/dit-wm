@@ -1,7 +1,9 @@
 import argparse
 import os
 from diffusers.models import AutoencoderKL
-from atari_100k_dataset import env_rollout
+# from atari_100k_dataset import env_rollout
+from atari_100k_dataset_p import env_rollout
+from mod_dit import train_dit_wm
 
 
 '''
@@ -16,6 +18,8 @@ if __name__ == '__main__':
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Atari environment ID')
     parser.add_argument('--n_rollouts', type=int, default=100, help='Rollouts to collect per policy step')
     parser.add_argument('--n_epochs', type=int, default=50, help='Training epochs for DiT')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for DiT training')
+    parser.add_argument('--val_split', type=float, default=0.1, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
     parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to HDF5 dataset')
     parser.add_argument('--delete_dataset', type=bool, default=False, help='If set, deletes existing dataset and starts fresh')
     
@@ -35,4 +39,12 @@ if __name__ == '__main__':
 
     VAE = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to('cuda')
     env_rollout(ENV_NAME, N_ROLLOUTS, VAE, DATASET_PATH)
+
     
+    print(f"Starting DiT Training | Batch Size: {args.batch_size} | Val Split: {args.val_split}")
+    train_dit_wm(
+        args.dataset_path, 
+        epochs=args.n_epochs, 
+        batch_size=args.batch_size, 
+        val_split=args.val_split
+    )
