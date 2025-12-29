@@ -5,13 +5,6 @@ from diffusers.models import AutoencoderKL
 from rollout_gen_p import env_rollout
 from mod_dit import train_dit_wm
 
-### TO DO ###
-
-# Documentation
-# parser DiT arquitecture args
-
-### TO DO ###
-
 
 '''
     1. data collection (100 rollouts per policy)
@@ -26,6 +19,11 @@ if __name__ == '__main__':
     parser.add_argument('--n_rollouts', type=int, default=100, help='Rollouts to collect per policy step')
     parser.add_argument('--n_epochs', type=int, default=50, help='Training epochs for DiT')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for DiT training')
+    parser.add_argument('--in_channels', type=int, default=4, help='Number of channels in latent space')
+    parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
+    parser.add_argument('--hidden_size', type=int, default=384, help='Transformer embedding dimension')
+    parser.add_argument('--depth', type=int, default=6, help='Number of DiT blocks')
+    parser.add_argument('--num_heads', type=int, default=6, help='Number of attention heads')
     parser.add_argument('--val_split', type=float, default=0.1, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
     parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to HDF5 dataset')
     parser.add_argument('--delete_dataset', type=bool, default=False, help='If set, deletes existing dataset and starts fresh')
@@ -47,11 +45,14 @@ if __name__ == '__main__':
     VAE = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to('cuda')
     env_rollout(ENV_NAME, N_ROLLOUTS, VAE, DATASET_PATH)
 
-    
-    print(f"Starting DiT Training | Batch Size: {args.batch_size} | Val Split: {args.val_split}")
     train_dit_wm(
         args.dataset_path, 
         epochs=args.n_epochs, 
         batch_size=args.batch_size, 
-        val_split=args.val_split
+        val_split=args.val_split,
+        in_channels=args.in_channels,
+        context_frames=args.context_frames,
+        hidden_size=args.hidden_size,
+        depth=args.depth,
+        num_heads=args.num_heads
     )

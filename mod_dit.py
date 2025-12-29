@@ -102,8 +102,11 @@ class DiT_WM(nn.Module):
         return unpatchify(x, self.in_channels)
 
 
-def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1, device='cuda'):    
-    full_dataset = AtariH5Dataset(dataset_path)
+def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1, 
+                 in_channels=4, context_frames=4, hidden_size=384, depth=6, num_heads=6, 
+                 device='cuda'):    
+    
+    full_dataset = AtariH5Dataset(dataset_path, context_len=context_frames)
     val_size = int(len(full_dataset) * val_split)
     train_size = len(full_dataset) - val_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
@@ -111,7 +114,14 @@ def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1, device='
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
-    model = DiT_WM(in_channels=4, context_frames=4, num_actions=18).to(device)
+    model = DiT_WM(
+        in_channels=in_channels, 
+        context_frames=context_frames, 
+        hidden_size=hidden_size, 
+        depth=depth, 
+        num_heads=num_heads, 
+        num_actions=18
+    ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     mse = nn.MSELoss()
 
