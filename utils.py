@@ -10,6 +10,13 @@ from diffusers.models import AutoencoderKL
 from vae import decode_latent
 from atari_dataset import AtariH5Dataset
 
+DIT_CONFIGS = {
+    'DiT-S': {'hidden_size': 384, 'depth': 12, 'num_heads': 6},
+    'DiT-B': {'hidden_size': 768, 'depth': 12, 'num_heads': 12},
+    'DiT-L': {'hidden_size': 1024, 'depth': 24, 'num_heads': 16},
+    'DiT-XL': {'hidden_size': 1152, 'depth': 28, 'num_heads': 16},
+}
+
 
 '''
 plot_atari_frame(): Plots observation from atari game.
@@ -112,7 +119,7 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
 
     print(f"Creating denoising video from {weights_path}...")
 
-    model.load_state_dict(torch.load(weights_path))
+    model.load_state_dict(torch.load(weights_path, map_location=device))
     model.to(device)
     model.eval()
 
@@ -133,8 +140,10 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
     ctx_acts = ctx_acts.unsqueeze(0).to(device)
 
     xt = torch.randn_like(target_clean)
+    
+    fps = 10.0
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_filename, fourcc, 10.0, (64, 64))
+    out = cv2.VideoWriter(output_filename, fourcc, fps, (64, 64))
 
     print("Sampling reverse process...")
     num_steps = 1000
@@ -146,28 +155,28 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
             model_input = torch.cat([xt, context], dim=1)
             noise_pred = model(model_input, t, tgt_act, ctx_acts)
             
-            alpha_bar_t = 1 - t_idx / 1000.0
-            alpha_bar_prev = 1 - (t_idx - 1) / 1000.0 if t_idx > 0 else 1.0
-            beta_t = 1 - (alpha_bar_t / alpha_bar_prev)
-            
             if t_idx > 0:
-                sigma_t = np.sqrt(beta_t)
-                z = torch.randn_like(xt)
-            else:
-                sigma_t = 0
-                z = 0
+                alpha_bar_t = 1 - t_idx / 1000.0
+                alpha_bar_prev = 1 - (t_idx - 1) / 1000.0
                 
-            alpha_t = 1.0 - beta_t
-            xt = (1 / np.sqrt(alpha_t)) * (xt - (beta_t / np.sqrt(1 - alpha_bar_t)) * noise_pred) + sigma_t * z
+                beta_t = 1 - (alpha_bar_t / alpha_bar_prev)
+                alpha_t = 1.0 - beta_t
+                sigma_t = np.sqrt(beta_t)
+                
+                z = torch.randn_like(xt)
+                xt = (1 / np.sqrt(alpha_t)) * (xt - (beta_t / np.sqrt(1 - alpha_bar_t)) * noise_pred) + sigma_t * z
 
             if t_idx % 20 == 0 or t_idx == 0:
                 frame_pixels = decode_latent(xt, vae, device=device)
                 img_bgr = cv2.cvtColor(frame_pixels, cv2.COLOR_RGB2BGR)
                 out.write(img_bgr)
+                
+                if t_idx == 0:
+                    for _ in range(int(fps * 3)):
+                        out.write(img_bgr)
 
     out.release()
     print(f"Video saved to {output_filename}")
-
 
 def timestep_embedding(timesteps, dim, max_period=10000):
     half = dim // 2
@@ -195,8 +204,20 @@ if __name__ == "__main__":
     parser.add_argument('--output', type=str, default='output.mp4', help='Output video filename')
     parser.add_argument('--rollout_idx', type=int, default=0, help='Rollout index (video mode)')
     
+    parser.add_argument('--model', type=str, default=None, choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
+    parser.add_argument('--depth', type=int, default=6, help='Number of blocks')
+    parser.add_argument('--num_heads', type=int, default=6, help='Number of heads')
+    
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if args.model:
+        config = DIT_CONFIGS[args.model]
+        print(f"(!) Using standard configuration for {args.model}")
+        args.hidden_size = config['hidden_size']
+        args.depth = config['depth']
+        args.num_heads = config['num_heads']
 
     if args.mode == 'inspect':
         inspect_dataset(args.path)
@@ -213,6 +234,14 @@ if __name__ == "__main__":
             print("Error: Could not import DiT_WM from mod_dit.py.")
             exit()
             
-        print("Initializing Model...")
-        model = DiT_WM(in_channels=4, context_frames=4, num_actions=18)
+        print(f"Initializing Model (H={args.hidden_size}, D={args.depth})...")
+        
+        model = DiT_WM(
+            in_channels=4, 
+            context_frames=4, 
+            num_actions=18,
+            hidden_size=args.hidden_size,
+            depth=args.depth,
+            num_heads=args.num_heads
+        )
         visualize_denoising(model, args.weights, args.path, args.output, device=device)
