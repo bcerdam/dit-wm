@@ -60,9 +60,10 @@ class DiT_WM(nn.Module):
         total_in_channels = in_channels + (in_channels * context_frames)
 
         self.x_embedder = nn.Conv2d(total_in_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
+
         num_patches = (input_size // patch_size) ** 2
-        
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        # self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
+        self.pos_embed = nn.Parameter(torch.randn(1, num_patches, hidden_size) * 0.02, requires_grad=True)
         
         # Conditioning
         self.t_embedder = nn.Sequential(nn.Linear(256, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size))
