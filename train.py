@@ -2,7 +2,7 @@ import argparse
 import os
 from diffusers.models import AutoencoderKL
 # from atari_100k_dataset import env_rollout
-from atari_100k_dataset_p import env_rollout
+from rollout_gen_p import env_rollout
 from mod_dit import train_dit_wm
 
 

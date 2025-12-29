@@ -8,6 +8,8 @@ from PIL import Image
 from tqdm import tqdm
 from diffusers.models import AutoencoderKL
 from vae import decode_latent
+from atari_dataset import AtariH5Dataset
+
 
 '''
 plot_atari_frame(): Plots observation from atari game.
@@ -99,20 +101,101 @@ def create_video(dataset_path, output_filename, rollout_idx, vae, device='cuda')
         out.release()
         print(f"Video saved to {output_filename}")
 
+
+'''
+visualize_denoising(): Decodes latents from HDF5 and saves an .mp4 video.
+'''
+def visualize_denoising(model, weights_path, dataset_path, output_filename='denoising.mp4', device='cuda'):
+    if not os.path.exists(weights_path):
+        print(f"Error: Weights file '{weights_path}' not found.")
+        return
+
+    print(f"Creating denoising video from {weights_path}...")
+
+    model.load_state_dict(torch.load(weights_path))
+    model.to(device)
+    model.eval()
+
+    print("Loading VAE...")
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
+
+    dataset = AtariH5Dataset(dataset_path)
+    if len(dataset) == 0:
+        print("Error: Dataset is empty or too short.")
+        return
+
+    rand_idx = np.random.randint(0, len(dataset))
+    target_clean, context, tgt_act, ctx_acts = dataset[rand_idx]
+    
+    target_clean = target_clean.unsqueeze(0).to(device)
+    context = context.unsqueeze(0).to(device)
+    tgt_act = tgt_act.unsqueeze(0).to(device)
+    ctx_acts = ctx_acts.unsqueeze(0).to(device)
+
+    xt = torch.randn_like(target_clean)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_filename, fourcc, 10.0, (64, 64))
+
+    print("Sampling reverse process...")
+    num_steps = 1000
+    
+    with torch.no_grad():
+        for t_idx in tqdm(reversed(range(num_steps)), total=num_steps):
+            t = torch.tensor([t_idx], device=device).long()
+            
+            model_input = torch.cat([xt, context], dim=1)
+            noise_pred = model(model_input, t, tgt_act, ctx_acts)
+            
+            alpha_bar_t = 1 - t_idx / 1000.0
+            alpha_bar_prev = 1 - (t_idx - 1) / 1000.0 if t_idx > 0 else 1.0
+            beta_t = 1 - (alpha_bar_t / alpha_bar_prev)
+            
+            if t_idx > 0:
+                sigma_t = np.sqrt(beta_t)
+                z = torch.randn_like(xt)
+            else:
+                sigma_t = 0
+                z = 0
+                
+            alpha_t = 1.0 - beta_t
+            xt = (1 / np.sqrt(alpha_t)) * (xt - (beta_t / np.sqrt(1 - alpha_bar_t)) * noise_pred) + sigma_t * z
+
+            if t_idx % 20 == 0 or t_idx == 0:
+                frame_pixels = decode_latent(xt, vae, device=device)
+                img_bgr = cv2.cvtColor(frame_pixels, cv2.COLOR_RGB2BGR)
+                out.write(img_bgr)
+
+    out.release()
+    print(f"Video saved to {output_filename}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Atari Dataset Utilities")
+    parser.add_argument('mode', choices=['inspect', 'video', 'denoise'], help='Select utility function to run')
     
-    parser.add_argument('mode', choices=['inspect', 'video'], help='Select utility function to run')
     parser.add_argument('--path', type=str, default='atari_dataset.h5', help='Path to .h5 dataset')
-    parser.add_argument('--rollout_idx', type=int, default=0, help='Index of rollout to render (video mode only)')
-    parser.add_argument('--output', type=str, default='rollout.mp4', help='Output filename (video mode only)')
+    parser.add_argument('--weights', type=str, default='dit_wm.pt', help='Path to model weights (denoise mode)')
+    parser.add_argument('--output', type=str, default='output.mp4', help='Output video filename')
+    parser.add_argument('--rollout_idx', type=int, default=0, help='Rollout index (video mode)')
+    
     args = parser.parse_args()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if args.mode == 'inspect':
         inspect_dataset(args.path)
         
     elif args.mode == 'video':
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Loading VAE on {device}...")
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
         create_video(args.path, args.output, args.rollout_idx, vae, device)
+        
+    elif args.mode == 'denoise':
+        try:
+            from mod_dit import DiT_WM
+        except ImportError:
+            print("Error: Could not import DiT_WM from mod_dit.py.")
+            exit()
+            
+        print("Initializing Model...")
+        model = DiT_WM(in_channels=4, context_frames=4, num_actions=18)
+        visualize_denoising(model, args.weights, args.path, args.output, device=device)
