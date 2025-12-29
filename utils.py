@@ -9,6 +9,7 @@ from tqdm import tqdm
 from diffusers.models import AutoencoderKL
 from vae import decode_latent
 from atari_dataset import AtariH5Dataset
+from rollout_gen_p import env_rollout
 
 DIT_CONFIGS = {
     'DiT-S': {'hidden_size': 384, 'depth': 12, 'num_heads': 6},
@@ -109,26 +110,96 @@ def create_video(dataset_path, output_filename, rollout_idx, vae, device='cuda')
         print(f"Video saved to {output_filename}")
 
 
+def visualize_raw_agent(env_name, output_filename='raw_agent.mp4'):
+    try:
+        import gymnasium as gym
+    except ImportError:
+        import gym
+
+    temp_path = "temp_raw_rollout.h5"
+    print(f"(!) Collecting RAW observations from {env_name} (Resized to 64x64)...")
+    
+    env = gym.make(env_name, render_mode='rgb_array')
+    obs, _ = env.reset()
+    
+    frames = []
+    actions = []
+    terminated = []
+    
+    frame_64 = cv2.resize(obs, (64, 64), interpolation=cv2.INTER_AREA)
+    frames.append(frame_64)
+    terminated.append(False)
+    
+    done = False
+    trunc = False
+    
+    while not (done or trunc):
+        action = env.action_space.sample()
+        obs, reward, done, trunc, _ = env.step(action)
+        
+        frame_64 = cv2.resize(obs, (64, 64), interpolation=cv2.INTER_AREA)
+        frames.append(frame_64)
+        actions.append(action)
+        terminated.append(done or trunc)
+        
+        if len(frames) >= 500:
+            break
+            
+    env.close()
+
+    print(f"Saving temporary dataset to {temp_path}...")
+    with h5py.File(temp_path, 'w') as f:
+        f.create_dataset('observations', data=np.array(frames), compression='gzip')
+        f.create_dataset('actions', data=np.array(actions))
+        f.create_dataset('terminated', data=np.array(terminated))
+
+    print(f"Rendering raw video to {output_filename}...")
+    
+    with h5py.File(temp_path, 'r') as f:
+        data = f['observations'][:]
+        
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_filename, fourcc, 30.0, (64, 64))
+    
+    for img_rgb in tqdm(data):
+        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+        out.write(img_bgr)
+        
+    out.release()
+    
+    if os.path.exists(temp_path):
+        os.remove(temp_path)
+    
+
+
 '''
 visualize_denoising(): Decodes latents from HDF5 and saves an .mp4 video.
 '''
-def visualize_denoising(model, weights_path, dataset_path, output_filename='denoising.mp4', device='cuda'):
+def visualize_denoising(model, weights_path, dataset_path, output_filename='denoising.mp4', device='cuda', env_name=None):
     if not os.path.exists(weights_path):
         print(f"Error: Weights file '{weights_path}' not found.")
         return
 
-    print(f"Creating denoising video from {weights_path}...")
+    print(f"Loading VAE on {device}...")
+    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
 
+    temp_file = "temp_honest_eval.h5"
+    if env_name:
+        print(f"(!) Generating FRESH rollout from {env_name} to ensure unseen data...")
+        if os.path.exists(temp_file): os.remove(temp_file)
+        # Generate 1 fresh episode
+        env_rollout(env_name, 1, vae, temp_file)
+        dataset_path = temp_file
+
+    print(f"Creating denoising video from {weights_path} using {dataset_path}...")
+    
     model.load_state_dict(torch.load(weights_path, map_location=device))
     model.to(device)
     model.eval()
 
-    print("Loading VAE...")
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
-
     dataset = AtariH5Dataset(dataset_path)
     if len(dataset) == 0:
-        print("Error: Dataset is empty or too short.")
+        print("Error: Dataset is empty.")
         return
 
     rand_idx = np.random.randint(0, len(dataset))
@@ -178,6 +249,10 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
     out.release()
     print(f"Video saved to {output_filename}")
 
+    if env_name and os.path.exists(temp_file):
+        os.remove(temp_file)
+        print("(!) Cleaned up temporary evaluation dataset.")
+
 def timestep_embedding(timesteps, dim, max_period=10000):
     half = dim // 2
     freqs = torch.exp(-torch.log(torch.tensor(max_period)) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(timesteps.device)
@@ -197,7 +272,7 @@ def unpatchify(x, channels):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Atari Dataset Utilities")
-    parser.add_argument('mode', choices=['inspect', 'video', 'denoise'], help='Select utility function to run')
+    parser.add_argument('mode', choices=['inspect', 'video', 'denoise', 'video_raw'], help='Select utility function to run')
     
     parser.add_argument('--path', type=str, default='atari_dataset.h5', help='Path to .h5 dataset')
     parser.add_argument('--weights', type=str, default='dit_wm.pt', help='Path to model weights (denoise mode)')
@@ -208,6 +283,8 @@ if __name__ == "__main__":
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of heads')
+
+    parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
     
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -244,4 +321,13 @@ if __name__ == "__main__":
             depth=args.depth,
             num_heads=args.num_heads
         )
-        visualize_denoising(model, args.weights, args.path, args.output, device=device)
+        
+        visualize_denoising(model, args.weights, args.path, args.output, device=device, env_name=args.env_name)
+
+    elif args.mode == 'video_raw':
+        if not args.env_name:
+            print("Error: --env_name is required for raw video generation (e.g. ALE/Breakout-v5)")
+            exit()
+        visualize_raw_agent(args.env_name, args.output)
+
+    
