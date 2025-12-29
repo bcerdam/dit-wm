@@ -1,10 +1,15 @@
 import argparse
 import os
 from diffusers.models import AutoencoderKL
-# from atari_100k_dataset import env_rollout
 from rollout_gen_p import env_rollout
 from mod_dit import train_dit_wm
 
+DIT_CONFIGS = {
+    'DiT-S': {'hidden_size': 384, 'depth': 12, 'num_heads': 6},
+    'DiT-B': {'hidden_size': 768, 'depth': 12, 'num_heads': 12},
+    'DiT-L': {'hidden_size': 1024, 'depth': 24, 'num_heads': 16},
+    'DiT-XL': {'hidden_size': 1152, 'depth': 28, 'num_heads': 16},
+}
 
 '''
     1. data collection (100 rollouts per policy)
@@ -19,6 +24,7 @@ if __name__ == '__main__':
     parser.add_argument('--n_rollouts', type=int, default=100, help='Rollouts to collect per policy step')
     parser.add_argument('--n_epochs', type=int, default=50, help='Training epochs for DiT')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for DiT training')
+    parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--in_channels', type=int, default=4, help='Number of channels in latent space')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--hidden_size', type=int, default=384, help='Transformer embedding dimension')
@@ -29,6 +35,13 @@ if __name__ == '__main__':
     parser.add_argument('--delete_dataset', type=bool, default=False, help='If set, deletes existing dataset and starts fresh')
     
     args = parser.parse_args()
+
+    if args.model:
+        config = DIT_CONFIGS[args.model]
+        print(f"(!) Using standard configuration for {args.model}")
+        args.hidden_size = config['hidden_size']
+        args.depth = config['depth']
+        args.num_heads = config['num_heads']
 
     if args.delete_dataset:
         if os.path.exists(args.dataset_path):
