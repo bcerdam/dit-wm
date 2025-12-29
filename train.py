@@ -5,6 +5,13 @@ from diffusers.models import AutoencoderKL
 from rollout_gen_p import env_rollout
 from mod_dit import train_dit_wm
 
+### TO DO ###
+
+# Documentation
+# parser DiT arquitecture args
+
+### TO DO ###
+
 
 '''
     1. data collection (100 rollouts per policy)

@@ -9,11 +9,13 @@ from tqdm import tqdm
 from diffusers.models import AutoencoderKL
 from vae import decode_latent
 from atari_dataset import AtariH5Dataset
+from utils import timestep_embedding, unpatchify
 
-# --- Compact DiT Architecture ---
+
 class DiTBlock(nn.Module):
     def __init__(self, hidden_size, num_heads, mlp_ratio=4.0):
         super().__init__()
+
         self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.attn = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True)
         self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
@@ -28,18 +30,23 @@ class DiTBlock(nn.Module):
         )
 
     def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(c).chunk(6, dim=1)
-        x_norm = (1 + scale_msa.unsqueeze(1)) * self.norm1(x) + shift_msa.unsqueeze(1)
+        beta_1, gamma_1, alpha_1, beta_2, gamma_2, alpha_2 = self.adaLN_modulation(c).chunk(6, dim=1)
+        
+        x_norm = (1 + gamma_1.unsqueeze(1)) * self.norm1(x) + beta_1.unsqueeze(1)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm)
-        x = x + gate_msa.unsqueeze(1) * attn_out
-        x_norm = (1 + scale_mlp.unsqueeze(1)) * self.norm2(x) + shift_mlp.unsqueeze(1)
+        x = x + alpha_1.unsqueeze(1) * attn_out
+        
+        x_norm = (1 + gamma_2.unsqueeze(1)) * self.norm2(x) + beta_2.unsqueeze(1)
         mlp_out = self.mlp(x_norm)
-        x = x + gate_mlp.unsqueeze(1) * mlp_out
+        x = x + alpha_2.unsqueeze(1) * mlp_out
+        
         return x
+
 
 class FinalLayer(nn.Module):
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
+
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
@@ -62,17 +69,13 @@ class DiT_WM(nn.Module):
         self.x_embedder = nn.Conv2d(total_in_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
 
         num_patches = (input_size // patch_size) ** 2
+
+        # Conditioning
         # self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
         self.pos_embed = nn.Parameter(torch.randn(1, num_patches, hidden_size) * 0.02, requires_grad=True)
-        
-        # Conditioning
         self.t_embedder = nn.Sequential(nn.Linear(256, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size))
-        
-        # Target Action Embedder (The action we are predicting the consequence of)
         self.act_embedder = nn.Embedding(num_actions, hidden_size)
         
-        # Context Actions Embedder (The history of actions)
-        # We embed them, flatten them, and project to hidden_size to add to 'c'
         self.ctx_act_embedder = nn.Embedding(num_actions, hidden_size)
         self.ctx_act_proj = nn.Linear(hidden_size * context_frames, hidden_size)
 
@@ -80,23 +83,15 @@ class DiT_WM(nn.Module):
         self.final_layer = FinalLayer(hidden_size, patch_size, in_channels)
 
     def forward(self, x, t, target_action, context_actions):
-        # 1. Timestep Embedding
         t_emb = timestep_embedding(t, 256).to(x.device)
         t_vec = self.t_embedder(t_emb)
         
-        # 2. Target Action Embedding
         act_vec = self.act_embedder(target_action)
-        
-        # 3. Context Actions Embedding
-        # context_actions: (B, context_frames)
-        ctx_emb = self.ctx_act_embedder(context_actions) # (B, 4, H)
-        ctx_emb = ctx_emb.flatten(1)                     # (B, 4*H)
-        ctx_vec = self.ctx_act_proj(ctx_emb)             # (B, H)
-
-        # Combine all conditioning
+        ctx_emb = self.ctx_act_embedder(context_actions)
+        ctx_emb = ctx_emb.flatten(1)
+        ctx_vec = self.ctx_act_proj(ctx_emb)
         c = t_vec + act_vec + ctx_vec
         
-        # 4. Patchify & Transformer
         x = self.x_embedder(x).flatten(2).transpose(1, 2)
         x = x + self.pos_embed
         
@@ -105,22 +100,6 @@ class DiT_WM(nn.Module):
             
         x = self.final_layer(x, c)
         return unpatchify(x, self.in_channels)
-
-# --- Utilities (Unchanged) ---
-def timestep_embedding(timesteps, dim, max_period=10000):
-    half = dim // 2
-    freqs = torch.exp(-torch.log(torch.tensor(max_period)) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(timesteps.device)
-    args = timesteps[:, None].float() * freqs[None]
-    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-    if dim % 2: embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
-    return embedding
-
-def unpatchify(x, channels):
-    p = 2
-    h = w = int(x.shape[1] ** 0.5)
-    x = x.reshape(shape=(x.shape[0], h, w, p, p, channels))
-    x = torch.einsum('nhwpqc->nchpwq', x)
-    return x.reshape(shape=(x.shape[0], channels, h * p, h * p))
 
 
 def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1, device='cuda'):    
@@ -143,7 +122,6 @@ def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1, device='
         update_interval = max(1, len(train_loader) // 10)
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", miniters=update_interval)
         
-        # UPDATED UNPACKING
         for target, context, tgt_act, ctx_acts in pbar:
             target, context = target.to(device), context.to(device)
             tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
@@ -154,8 +132,6 @@ def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1, device='
             noisy_target = target * torch.sqrt(alpha_bar) + noise * torch.sqrt(1 - alpha_bar)
             
             model_input = torch.cat([noisy_target, context], dim=1)
-            
-            # UPDATED FORWARD CALL
             noise_pred = model(model_input, t, tgt_act, ctx_acts)
             
             loss = mse(noise_pred, noise)
@@ -170,27 +146,23 @@ def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1, device='
 
         avg_train_loss = train_loss_sum / len(train_loader)
 
-        # Validation
         model.eval()
         val_loss_sum = 0
-        if len(val_loader) > 0:
-            with torch.no_grad():
-                for target, context, tgt_act, ctx_acts in val_loader:
-                    target, context = target.to(device), context.to(device)
-                    tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
-                    
-                    t = torch.randint(0, 1000, (target.shape[0],), device=device).long()
-                    noise = torch.randn_like(target)
-                    alpha_bar = 1 - (t / 1000.0).view(-1, 1, 1, 1)
-                    noisy_target = target * torch.sqrt(alpha_bar) + noise * torch.sqrt(1 - alpha_bar)
-                    
-                    model_input = torch.cat([noisy_target, context], dim=1)
-                    noise_pred = model(model_input, t, tgt_act, ctx_acts)
-                    val_loss_sum += mse(noise_pred, noise).item()
-            avg_val_loss = val_loss_sum / len(val_loader)
-        else:
-            avg_val_loss = 0.0
-        
+        with torch.no_grad():
+            for target, context, tgt_act, ctx_acts in val_loader:
+                target, context = target.to(device), context.to(device)
+                tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
+                
+                t = torch.randint(0, 1000, (target.shape[0],), device=device).long()
+                noise = torch.randn_like(target)
+                alpha_bar = 1 - (t / 1000.0).view(-1, 1, 1, 1)
+                noisy_target = target * torch.sqrt(alpha_bar) + noise * torch.sqrt(1 - alpha_bar)
+                
+                model_input = torch.cat([noisy_target, context], dim=1)
+                noise_pred = model(model_input, t, tgt_act, ctx_acts)
+                val_loss_sum += mse(noise_pred, noise).item()
+        avg_val_loss = val_loss_sum / len(val_loader)
+
         save_msg = ""
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss

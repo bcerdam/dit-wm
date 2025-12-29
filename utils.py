@@ -169,6 +169,23 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
     print(f"Video saved to {output_filename}")
 
 
+def timestep_embedding(timesteps, dim, max_period=10000):
+    half = dim // 2
+    freqs = torch.exp(-torch.log(torch.tensor(max_period)) * torch.arange(start=0, end=half, dtype=torch.float32) / half).to(timesteps.device)
+    args = timesteps[:, None].float() * freqs[None]
+    embedding = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+    if dim % 2: embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
+    return embedding
+
+
+def unpatchify(x, channels):
+    p = 2
+    h = w = int(x.shape[1] ** 0.5)
+    x = x.reshape(shape=(x.shape[0], h, w, p, p, channels))
+    x = torch.einsum('nhwpqc->nchpwq', x)
+    return x.reshape(shape=(x.shape[0], channels, h * p, h * p))
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Atari Dataset Utilities")
     parser.add_argument('mode', choices=['inspect', 'video', 'denoise'], help='Select utility function to run')
