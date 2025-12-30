@@ -9,7 +9,17 @@ from tqdm import tqdm
 from diffusers.models import AutoencoderKL
 from vae import decode_latent
 from atari_dataset import AtariH5Dataset
-from utils import timestep_embedding, unpatchify
+from utils import unpatchify
+
+
+class FourierEmbedding(nn.Module):
+    def __init__(self, num_channels, scale=16):
+        super().__init__()
+        self.register_buffer('freqs', torch.randn(num_channels // 2) * scale)
+
+    def forward(self, x):
+        x = x.ger((2 * np.pi * self.freqs).to(x.dtype))
+        return torch.cat([x.cos(), x.sin()], dim=1)
 
 
 class DiTBlock(nn.Module):
@@ -59,10 +69,11 @@ class FinalLayer(nn.Module):
 
 class DiT_WM(nn.Module):
     def __init__(self, input_size=8, patch_size=2, in_channels=4, context_frames=4, 
-                 hidden_size=384, depth=6, num_heads=6, num_actions=18):
+                 hidden_size=384, depth=6, num_heads=6, num_actions=18, sigma_data=0.5):
         super().__init__()
 
         self.in_channels = in_channels
+        self.sigma_data = sigma_data
         self.context_frames = context_frames
         total_in_channels = in_channels + (in_channels * context_frames)
 
@@ -70,10 +81,20 @@ class DiT_WM(nn.Module):
 
         num_patches = (input_size // patch_size) ** 2
 
-        # Conditioning
-        # self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, hidden_size), requires_grad=False)
         self.pos_embed = nn.Parameter(torch.randn(1, num_patches, hidden_size) * 0.02, requires_grad=True)
-        self.t_embedder = nn.Sequential(nn.Linear(256, hidden_size), nn.SiLU(), nn.Linear(hidden_size, hidden_size))
+        self.sigma_map = nn.Sequential(
+            FourierEmbedding(256), 
+            nn.Linear(256, hidden_size), 
+            nn.SiLU(), 
+            nn.Linear(hidden_size, hidden_size)
+        )
+        self.cond_noise_map = nn.Sequential(
+            FourierEmbedding(256), 
+            nn.Linear(256, hidden_size), 
+            nn.SiLU(), 
+            nn.Linear(hidden_size, hidden_size)
+        )
+        
         self.act_embedder = nn.Embedding(num_actions, hidden_size)
         
         self.ctx_act_embedder = nn.Embedding(num_actions, hidden_size)
@@ -82,25 +103,37 @@ class DiT_WM(nn.Module):
         self.blocks = nn.ModuleList([DiTBlock(hidden_size, num_heads) for _ in range(depth)])
         self.final_layer = FinalLayer(hidden_size, patch_size, in_channels)
 
-    def forward(self, x, t, target_action, context_actions):
-        t_emb = timestep_embedding(t, 256).to(x.device)
-        t_vec = self.t_embedder(t_emb)
-        
+    def forward(self, x_noisy, sigma, context, cond_noise_level, target_action, context_actions):
+        c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
+        c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
+        c_in = 1 / (sigma ** 2 + self.sigma_data ** 2).sqrt()
+        c_noise = sigma.log() / 4.0
+
+        c_in = c_in.view(-1, 1, 1, 1)
+        c_skip = c_skip.view(-1, 1, 1, 1)
+        c_out = c_out.view(-1, 1, 1, 1)
+
+        F_x = c_in * x_noisy
+        model_input = torch.cat([F_x, context], dim=1)
+
+        sigma_vec = self.sigma_map(c_noise) 
+        cond_noise_vec = self.cond_noise_map(cond_noise_level.log() / 4.0)
         act_vec = self.act_embedder(target_action)
-        ctx_emb = self.ctx_act_embedder(context_actions)
-        ctx_emb = ctx_emb.flatten(1)
-        ctx_vec = self.ctx_act_proj(ctx_emb)
-        c = t_vec + act_vec + ctx_vec
+        ctx_vec = self.ctx_act_proj(self.ctx_act_embedder(context_actions).flatten(1))
+
+        c = sigma_vec + cond_noise_vec + act_vec + ctx_vec
         
-        x = self.x_embedder(x).flatten(2).transpose(1, 2)
+        x = self.x_embedder(model_input).flatten(2).transpose(1, 2)
         x = x + self.pos_embed
-        
         for block in self.blocks:
             x = block(x, c)
-            
         x = self.final_layer(x, c)
-        return unpatchify(x, self.in_channels)
+        
+        F_out = unpatchify(x, self.in_channels)
+        
+        D_x = c_skip * x_noisy + c_out * F_out
 
+        return D_x
 
 def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1, 
                  in_channels=4, context_frames=4, hidden_size=384, depth=6, num_heads=6, 
@@ -114,16 +147,21 @@ def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1,
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
+    P_mean = -1.2
+    P_std = 1.2
+    sigma_data = 0.5
+
     model = DiT_WM(
         in_channels=in_channels, 
         context_frames=context_frames, 
         hidden_size=hidden_size, 
         depth=depth, 
         num_heads=num_heads, 
-        num_actions=18
+        num_actions=18,
+        sigma_data=sigma_data
     ).to(device)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-    mse = nn.MSELoss()
 
     best_val_loss = float('inf')
     for epoch in range(epochs):
@@ -135,25 +173,29 @@ def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1,
         for target, context, tgt_act, ctx_acts in pbar:
             target, context = target.to(device), context.to(device)
             tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
+            batch_size = target.shape[0]
+
+            aug_sigma = torch.exp(torch.randn(batch_size, device=device) * P_std + P_mean).view(-1, 1, 1, 1)
+            context_noisy = context + aug_sigma * torch.randn_like(context)
+            cond_noise_level = aug_sigma.view(-1)
+            rnd_normal = torch.randn([batch_size, 1, 1, 1], device=device)
+            sigma = (rnd_normal * P_std + P_mean).exp()
             
-            t = torch.randint(0, 1000, (target.shape[0],), device=device).long()
             noise = torch.randn_like(target)
-            alpha_bar = 1 - (t / 1000.0).view(-1, 1, 1, 1)
-            noisy_target = target * torch.sqrt(alpha_bar) + noise * torch.sqrt(1 - alpha_bar)
-            
-            model_input = torch.cat([noisy_target, context], dim=1)
-            noise_pred = model(model_input, t, tgt_act, ctx_acts)
-            
-            loss = mse(noise_pred, noise)
-            
+            target_noisy = target + sigma * noise
+
+            D_x = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts)
+            weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
+            loss = (weight * ((D_x - target) ** 2)).mean()
+
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            
+
             train_loss_sum += loss.item()
             if pbar.n % update_interval == 0:
                 pbar.set_postfix(loss=f"{loss.item():.4f}")
-
+            
         avg_train_loss = train_loss_sum / len(train_loader)
 
         model.eval()
@@ -162,17 +204,26 @@ def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1,
             for target, context, tgt_act, ctx_acts in val_loader:
                 target, context = target.to(device), context.to(device)
                 tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
+                batch_size = target.shape[0]
                 
-                t = torch.randint(0, 1000, (target.shape[0],), device=device).long()
-                noise = torch.randn_like(target)
-                alpha_bar = 1 - (t / 1000.0).view(-1, 1, 1, 1)
-                noisy_target = target * torch.sqrt(alpha_bar) + noise * torch.sqrt(1 - alpha_bar)
-                
-                model_input = torch.cat([noisy_target, context], dim=1)
-                noise_pred = model(model_input, t, tgt_act, ctx_acts)
-                val_loss_sum += mse(noise_pred, noise).item()
-        avg_val_loss = val_loss_sum / len(val_loader)
+                aug_sigma = torch.exp(torch.randn(batch_size, device=device) * P_std + P_mean).view(-1, 1, 1, 1)
+                context_noisy = context + aug_sigma * torch.randn_like(context)
+                cond_noise_level = aug_sigma.view(-1)
 
+                rnd_normal = torch.randn([batch_size, 1, 1, 1], device=device)
+                sigma = (rnd_normal * P_std + P_mean).exp()
+                noise = torch.randn_like(target)
+                target_noisy = target + sigma * noise
+                
+                D_x = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts)
+                
+                weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
+                loss = (weight * ((D_x - target) ** 2)).mean()
+                
+                val_loss_sum += loss.item()
+
+
+        avg_val_loss = val_loss_sum / len(val_loader) if len(val_loader) > 0 else 0
         save_msg = ""
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
