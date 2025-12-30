@@ -16,14 +16,21 @@ class AtariH5Dataset(Dataset):
 
     def __getitem__(self, idx):
         end_idx = idx + self.context_len
+        raw_frames = self.latents[idx:end_idx+1]
+        
+        if raw_frames.dtype == 'uint8':
+            frames = torch.tensor(raw_frames).float() / 127.5 - 1.0
+        else:
+            frames = torch.tensor(raw_frames)
 
-        frames = torch.tensor(self.latents[idx:end_idx+1])
         actions = torch.tensor(self.actions[idx:end_idx+1])
         
         target_latent = frames[-1]
         target_action = actions[-1].long()
-        
-        context_latents = frames[:-1].reshape(-1, 8, 8)
+
+        h, w = frames.shape[-2], frames.shape[-1]
+
+        context_latents = frames[:-1].reshape(-1, h, w)
         context_actions = actions[:-1].long()
         
         return target_latent, context_latents, target_action, context_actions

@@ -171,13 +171,17 @@ def visualize_raw_agent(env_name, output_filename='raw_agent.mp4'):
         os.remove(temp_path)
     
 
-def visualize_denoising(model, weights_path, dataset_path, output_filename='denoising.mp4', device='cuda', env_name=None, num_steps=50):
+def visualize_denoising(model, weights_path, dataset_path, output_filename='denoising.mp4', device='cuda', env_name=None, num_steps=50, pixel_space=False):
     if not os.path.exists(weights_path):
         print(f"Error: Weights file '{weights_path}' not found.")
         return
 
-    print(f"Loading VAE on {device}...")
-    vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
+    vae = None
+    if not pixel_space:
+        print(f"Loading VAE on {device}...")
+        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
+    else:
+        print("(!) Visualizing in PIXEL SPACE (No VAE).")
 
     temp_file = "temp_honest_eval.h5"
     if env_name:
@@ -213,7 +217,7 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
     
     step_indices = torch.arange(num_steps, dtype=torch.float64, device=device)
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
-    t_steps = torch.cat([t_steps, torch.zeros_like(t_steps[:1])]).float() # Cast to float32!
+    t_steps = torch.cat([t_steps, torch.zeros_like(t_steps[:1])]).float()
 
     cond_noise_level = torch.tensor([1e-5], device=device)
     
@@ -234,11 +238,19 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
 
             viz_interval = max(1, num_steps // 50) 
             if i % viz_interval == 0 or i == num_steps - 1:
-                safe_latent = torch.nan_to_num(D_x, nan=0.0).clamp(-10, 10)
                 
-                frame_pixels = decode_latent(safe_latent, vae, device=device)
-                img_bgr = cv2.cvtColor(frame_pixels, cv2.COLOR_RGB2BGR)
-                out.write(img_bgr)
+                if pixel_space:
+                    img_tensor = (D_x[0].detach().cpu() + 1.0) / 2.0
+                    img_tensor = torch.clamp(img_tensor, 0, 1)
+                    img_np = img_tensor.permute(1, 2, 0).numpy()
+                    img_np = (img_np * 255).astype(np.uint8)
+                    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+                    out.write(img_bgr)
+                else:
+                    safe_latent = torch.nan_to_num(D_x, nan=0.0).clamp(-10, 10)
+                    frame_pixels = decode_latent(safe_latent, vae, device=device)
+                    img_bgr = cv2.cvtColor(frame_pixels, cv2.COLOR_RGB2BGR)
+                    out.write(img_bgr)
                 
                 if i == num_steps - 1:
                     for _ in range(int(fps * 3)):
@@ -252,7 +264,8 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
 
 
 def unpatchify(x, channels):
-    p = 2
+    patch_dim = x.shape[-1]
+    p = int((patch_dim // channels) ** 0.5)
     h = w = int(x.shape[1] ** 0.5)
     x = x.reshape(shape=(x.shape[0], h, w, p, p, channels))
     x = torch.einsum('nhwpqc->nchpwq', x)
@@ -276,6 +289,8 @@ if __name__ == "__main__":
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
     
     parser.add_argument('--num_steps', type=int, default=50, help='Number of sampling steps for EDM (default: 50)')
+    parser.add_argument('--pixel_space', action='store_true', help='Use if model is trained on pixels (64x64)')
+    parser.add_argument('--patch_size', type=int, default=2, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
 
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -302,16 +317,25 @@ if __name__ == "__main__":
             print("Error: Could not import DiT_WM from mod_dit.py.")
             exit()
             
-        print(f"Initializing Model (H={args.hidden_size}, D={args.depth})...")
+        if args.pixel_space:
+            in_channels = 3
+            input_size = 64
+        else:
+            in_channels = 4
+            input_size = 8
+            
+        print(f"Initializing Model (H={args.hidden_size}, D={args.depth}, Patch={args.patch_size}, Pixel={args.pixel_space})...")
         
         model = DiT_WM(
-            in_channels=4, 
+            in_channels=in_channels, 
             context_frames=4, 
             num_actions=18,
             hidden_size=args.hidden_size,
             depth=args.depth,
             num_heads=args.num_heads,
-            sigma_data=0.5 # Default EDM hyperparam
+            sigma_data=0.5,
+            input_size=input_size,
+            patch_size=args.patch_size
         )
         
         visualize_denoising(
@@ -321,7 +345,8 @@ if __name__ == "__main__":
             args.output, 
             device=device, 
             env_name=args.env_name, 
-            num_steps=args.num_steps
+            num_steps=args.num_steps,
+            pixel_space=args.pixel_space
         )
 
     elif args.mode == 'video_raw':

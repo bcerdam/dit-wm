@@ -73,6 +73,7 @@ class DiT_WM(nn.Module):
         super().__init__()
 
         self.in_channels = in_channels
+        self.patch_size = patch_size
         self.sigma_data = sigma_data
         self.context_frames = context_frames
         total_in_channels = in_channels + (in_channels * context_frames)
@@ -137,7 +138,7 @@ class DiT_WM(nn.Module):
 
 def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1, 
                  in_channels=4, context_frames=4, hidden_size=384, depth=6, num_heads=6, 
-                 device='cuda'):    
+                 device='cuda', input_size=8, patch_size=2):    
     
     full_dataset = AtariH5Dataset(dataset_path, context_len=context_frames)
     val_size = int(len(full_dataset) * val_split)
@@ -152,6 +153,8 @@ def train_dit_wm(dataset_path, epochs=10, batch_size=32, val_split=0.1,
     sigma_data = 0.5
 
     model = DiT_WM(
+        input_size=input_size,
+        patch_size=patch_size,
         in_channels=in_channels, 
         context_frames=context_frames, 
         hidden_size=hidden_size, 

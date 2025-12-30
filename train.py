@@ -27,13 +27,14 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--in_channels', type=int, default=4, help='Number of channels in latent space')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
+    parser.add_argument('--patch_size', type=int, default=2, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Transformer embedding dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of DiT blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of attention heads')
     parser.add_argument('--val_split', type=float, default=0.1, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
     parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to HDF5 dataset')
     parser.add_argument('--delete_dataset', type=bool, default=False, help='If set, deletes existing dataset and starts fresh')
-    
+    parser.add_argument('--pixel_space', action='store_true', help='If set, trains on 64x64 RGB pixels instead of VAE latents')
     args = parser.parse_args()
 
     if args.model:
@@ -55,7 +56,16 @@ if __name__ == '__main__':
     N_EPOCHS = args.n_epochs
     DATASET_PATH = args.dataset_path
 
-    VAE = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to('cuda')
+    if args.pixel_space:
+        print("(!) Training in PIXEL SPACE (64x64). VAE disabled.")
+        VAE = None 
+        args.in_channels = 3 
+        input_size = 64
+    else:
+        print("(!) Training in LATENT SPACE (8x8). VAE enabled.")
+        VAE = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to('cuda')
+        input_size = 8
+
     env_rollout(ENV_NAME, N_ROLLOUTS, VAE, DATASET_PATH)
 
     train_dit_wm(
@@ -67,5 +77,7 @@ if __name__ == '__main__':
         context_frames=args.context_frames,
         hidden_size=args.hidden_size,
         depth=args.depth,
-        num_heads=args.num_heads
+        num_heads=args.num_heads,
+        input_size=input_size, 
+        patch_size=args.patch_size
     )
