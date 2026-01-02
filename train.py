@@ -1,8 +1,15 @@
 import argparse
 import os
+import torch
+import numpy as np
 from diffusers.models import AutoencoderKL
-from rollout_gen_p import env_rollout
-from mod_dit import train_dit_wm
+from stable_baselines3 import PPO
+from rollout_gen import env_rollout
+from mod_dit import train_dit_wm, DiT_WM
+from dream_env import DreamEnv
+from atari_dataset import AtariH5Dataset
+from utils import get_num_actions
+from stable_baselines3.common.monitor import Monitor
 
 DIT_CONFIGS = {
     'DiT-S': {'hidden_size': 384, 'depth': 12, 'num_heads': 6},
@@ -11,73 +18,157 @@ DIT_CONFIGS = {
     'DiT-XL': {'hidden_size': 1152, 'depth': 28, 'num_heads': 16},
 }
 
-'''
-    1. data collection (100 rollouts per policy)
-    2. DiT train on whole dataset (Includes rollouts with init policy and improved policy)
-    3. Reward and Termination heads
-    4. PPO using DiT as dynamics model
-'''
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train DiT-WM")
     
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Atari environment ID')
-    parser.add_argument('--n_rollouts', type=int, default=100, help='Rollouts to collect per policy step')
-    parser.add_argument('--n_epochs', type=int, default=50, help='Training epochs for DiT')
-    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for DiT training')
+    parser.add_argument('--n_rollouts', type=int, default=10, help='Rollouts to collect per policy step')
+
+    parser.add_argument('--val_split', type=float, default=0.2, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
+    parser.add_argument('--n_epochs', type=int, default=10, help='Training epochs for DiT')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for DiT training')
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--in_channels', type=int, default=4, help='Number of channels in latent space')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
-    parser.add_argument('--patch_size', type=int, default=2, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
+    parser.add_argument('--patch_size', type=int, default=8, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Transformer embedding dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of DiT blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of attention heads')
-    parser.add_argument('--val_split', type=float, default=0.1, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
+
+    parser.add_argument('--denoising_steps', type=int, default=3, help='Number of denoising steps')
+
+
     parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to HDF5 dataset')
-    parser.add_argument('--delete_dataset', type=bool, default=False, help='If set, deletes existing dataset and starts fresh')
-    parser.add_argument('--pixel_space', action='store_true', help='If set, trains on 64x64 RGB pixels instead of VAE latents')
+    parser.add_argument('--delete_policy', type=bool, default=True, help='If set, deletes existing PPO agent and starts fresh')
+    parser.add_argument('--delete_dataset', type=bool, default=True, help='If set, deletes existing dataset and starts fresh')
+    
+    parser.add_argument('--pixel_space', type=bool, default=True, help='If set, trains on 64x64 RGB pixels instead of VAE latents')
+    
+    parser.add_argument('--mbrl_loops', type=int, default=10, help='Number of Collect-Train-Dream loops')
+    parser.add_argument('--ppo_steps', type=int, default=10, help='Steps to train PPO agent in dream')
+    
     args = parser.parse_args()
+
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    ENV_NAME = args.env_name
+    NUM_ACTIONS = get_num_actions(ENV_NAME)
+    N_ROLLOUTS = args.n_rollouts
+    N_EPOCHS = args.n_epochs
+    DATASET_PATH = args.dataset_path
+    POLICY_PATH = "ppo_agent.zip"
 
     if args.model:
         config = DIT_CONFIGS[args.model]
-        print(f"(!) Using standard configuration for {args.model}")
+        print(f"- Using configuration for {args.model}")
         args.hidden_size = config['hidden_size']
         args.depth = config['depth']
         args.num_heads = config['num_heads']
 
-    if args.delete_dataset:
-        if os.path.exists(args.dataset_path):
-            os.remove(args.dataset_path)
-            print(f"(!) Deleted existing dataset: {args.dataset_path}")
-        else:
-            print(f"(!) --delete_dataset set, but {args.dataset_path} not found.")
-
-    ENV_NAME = args.env_name
-    N_ROLLOUTS = args.n_rollouts
-    N_EPOCHS = args.n_epochs
-    DATASET_PATH = args.dataset_path
+    if args.delete_dataset == True:
+        os.remove(args.dataset_path)
+        print(f"- Deleted existing dataset: {args.dataset_path}")
+    if args.delete_policy and os.path.exists(POLICY_PATH):
+        os.remove(POLICY_PATH)
+        print(f"- Deleted existing policy: {POLICY_PATH}")
 
     if args.pixel_space:
-        print("(!) Training in PIXEL SPACE (64x64). VAE disabled.")
         VAE = None 
         args.in_channels = 3 
         input_size = 64
     else:
-        print("(!) Training in LATENT SPACE (8x8). VAE enabled.")
         VAE = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to('cuda')
         input_size = 8
 
-    env_rollout(ENV_NAME, N_ROLLOUTS, VAE, DATASET_PATH)
+    if not os.path.exists(POLICY_PATH):
+        dummy_wm = DiT_WM(
+            num_actions=NUM_ACTIONS,
+            input_size=input_size, 
+            patch_size=args.patch_size, 
+            in_channels=args.in_channels, 
+            context_frames=args.context_frames,
+            hidden_size=args.hidden_size, 
+            depth=args.depth, 
+            num_heads=args.num_heads
+        ).to(device)
 
-    train_dit_wm(
-        args.dataset_path, 
-        epochs=args.n_epochs, 
-        batch_size=args.batch_size, 
-        val_split=args.val_split,
-        in_channels=args.in_channels,
-        context_frames=args.context_frames,
-        hidden_size=args.hidden_size,
-        depth=args.depth,
-        num_heads=args.num_heads,
-        input_size=input_size, 
-        patch_size=args.patch_size
-    )
+        dummy_env = DreamEnv(dummy_wm, 
+                             VAE, 
+                             device, 
+                             args.pixel_space, 
+                             context_frames=args.context_frames, 
+                             num_steps=args.denoising_steps,
+                             num_actions=NUM_ACTIONS)
+        
+        agent = PPO("CnnPolicy", dummy_env, device='cpu')
+        agent.save(POLICY_PATH)
+        del dummy_wm, dummy_env, agent
+
+
+    for loop in range(args.mbrl_loops):
+        print(f"\n" + "="*40)
+        print(f"      STARTING MBRL LOOP {loop+1}/{args.mbrl_loops}")
+        print("="*40)
+
+        print(f"- Collecting {N_ROLLOUTS} rollouts with policy: {POLICY_PATH}")
+        env_rollout(ENV_NAME, N_ROLLOUTS, VAE, DATASET_PATH, policy_path=POLICY_PATH)
+
+        print("- Training DiT World Model...")
+        train_dit_wm(
+            args.dataset_path, 
+            num_actions=NUM_ACTIONS,
+            epochs=N_EPOCHS, 
+            batch_size=args.batch_size, 
+            val_split=args.val_split,
+            in_channels=args.in_channels,
+            context_frames=args.context_frames,
+            hidden_size=args.hidden_size,
+            depth=args.depth,
+            num_heads=args.num_heads,
+            input_size=input_size, 
+            patch_size=args.patch_size
+        )
+
+        print("- PPO currently dreaming...")
+        
+        wm_model = DiT_WM(
+            num_actions=NUM_ACTIONS,
+            input_size=input_size, 
+            patch_size=args.patch_size, 
+            in_channels=args.in_channels, 
+            context_frames=args.context_frames,
+            hidden_size=args.hidden_size, 
+            depth=args.depth, 
+            num_heads=args.num_heads
+        ).to(device)
+        wm_model.load_state_dict(torch.load("dit_wm.pt"))
+        wm_model.eval()
+
+        dream_env = DreamEnv(wm_model, VAE, device, args.pixel_space, context_frames=args.context_frames)
+        dream_env = Monitor(dream_env)
+        
+        print("- Warmup buffer...")
+        ds = AtariH5Dataset(DATASET_PATH, context_len=args.context_frames)
+        warmup_obs = []
+        indices = np.linspace(0, len(ds)-1, min(len(ds), 500), dtype=int)
+
+        for idx in indices:
+            ctx_data = ds[idx][1] 
+            ctx_data = ctx_data.view(args.context_frames, args.in_channels, input_size, input_size)
+            warmup_obs.append(ctx_data.to(device))
+        
+        dream_env.unwrapped.set_warmup_buffer(warmup_obs)
+
+        if hasattr(ds, 'close'):
+            ds.close()
+        if hasattr(ds, 'file'):
+            ds.file.close()
+        del ds
+
+        print(f"- Optimizing agent for {args.ppo_steps} steps...")
+        agent = PPO.load(POLICY_PATH, env=dream_env, verbose=1, device='cpu')
+        agent.learn(total_timesteps=args.ppo_steps)
+        agent.save(POLICY_PATH)
+        print("- Agent updated and saved.")
+
+    print("\nMBRL Training Complete")

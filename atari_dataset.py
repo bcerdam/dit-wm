@@ -7,6 +7,7 @@ class AtariH5Dataset(Dataset):
         self.f = h5py.File(h5_path, 'r')
         self.latents = self.f['latents']
         self.actions = self.f['actions']
+        self.rewards = self.f['rewards']
         self.terminated = self.f['terminated']
         self.length = len(self.latents)
         self.context_len = context_len
@@ -24,6 +25,8 @@ class AtariH5Dataset(Dataset):
             frames = torch.tensor(raw_frames)
 
         actions = torch.tensor(self.actions[idx:end_idx+1])
+        reward = torch.tensor(self.rewards[end_idx]).float()
+        done = torch.tensor(self.terminated[end_idx]).float()
         
         target_latent = frames[-1]
         target_action = actions[-1].long()
@@ -33,4 +36,4 @@ class AtariH5Dataset(Dataset):
         context_latents = frames[:-1].reshape(-1, h, w)
         context_actions = actions[:-1].long()
         
-        return target_latent, context_latents, target_action, context_actions
+        return target_latent, context_latents, target_action, context_actions, reward, done
