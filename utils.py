@@ -12,6 +12,11 @@ from atari_dataset import AtariH5Dataset
 from rollout_gen import env_rollout
 import gymnasium as gym
 import ale_py
+from stable_baselines3.common.callbacks import BaseCallback
+import imageio
+import torch
+import numpy as np
+import os
 
 
 DIT_CONFIGS = {
@@ -364,6 +369,7 @@ def edm_sampler(model, context, target_action, ctx_acts, device, input_size, in_
         latents = latents + (sigma_next - sigma_cur) * d_cur
         
     return D_x, pred_r, pred_d
+
 
 def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_space=False, context_frames=4, num_steps=50, policy_path=None):
     """

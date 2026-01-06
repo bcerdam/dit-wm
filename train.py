@@ -11,6 +11,7 @@ from atari_dataset import AtariH5Dataset
 from utils import get_num_actions
 from stable_baselines3.common.monitor import Monitor
 
+
 DIT_CONFIGS = {
     'DiT-S': {'hidden_size': 384, 'depth': 12, 'num_heads': 6},
     'DiT-B': {'hidden_size': 768, 'depth': 12, 'num_heads': 12},
@@ -23,13 +24,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train DiT-WM")
     
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Atari environment ID')
-    parser.add_argument('--n_rollouts', type=int, default=10, help='Rollouts to collect per policy step')
+    parser.add_argument('--n_rollouts', type=int, default=100, help='Rollouts to collect per policy step')
 
     parser.add_argument('--val_split', type=float, default=0.2, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
     parser.add_argument('--n_epochs', type=int, default=10, help='Training epochs for DiT')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for DiT training')
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
-    parser.add_argument('--in_channels', type=int, default=4, help='Number of channels in latent space')
+    parser.add_argument('--in_channels', type=int, default=3, help='Number of channels in latent space')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--patch_size', type=int, default=8, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Transformer embedding dimension')
@@ -40,13 +41,24 @@ if __name__ == '__main__':
 
 
     parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to HDF5 dataset')
-    parser.add_argument('--delete_policy', type=bool, default=True, help='If set, deletes existing PPO agent and starts fresh')
-    parser.add_argument('--delete_dataset', type=bool, default=True, help='If set, deletes existing dataset and starts fresh')
+
+
+    parser.add_argument('--delete_policy', action='store_true', default=True, help='If set, deletes existing PPO agent')
+    parser.add_argument('--keep_policy', action='store_false', dest='delete_policy', help='Keep existing policy')
+    
+    parser.add_argument('--delete_dataset', action='store_true', default=True, help='If set, deletes existing dataset')
+    parser.add_argument('--keep_dataset', action='store_false', dest='delete_dataset', help='Keep existing dataset')
+
+    parser.add_argument('--delete_wm', action='store_true', default=True, help='If set, deletes existing DiT weights (dit_wm.pt)')
+    parser.add_argument('--keep_wm', action='store_false', dest='delete_wm', help='Keep existing DiT weights')
+
+    parser.add_argument('--clear_dataset_per_loop', action='store_true', default=True,
+                        help='If set, deletes the dataset at the start of every MBRL loop to train only on fresh data')
     
     parser.add_argument('--pixel_space', type=bool, default=True, help='If set, trains on 64x64 RGB pixels instead of VAE latents')
     
-    parser.add_argument('--mbrl_loops', type=int, default=10, help='Number of Collect-Train-Dream loops')
-    parser.add_argument('--ppo_steps', type=int, default=10, help='Steps to train PPO agent in dream')
+    parser.add_argument('--mbrl_loops', type=int, default=100, help='Number of Collect-Train-Dream loops')
+    parser.add_argument('--ppo_steps', type=int, default=1000, help='Steps to train PPO agent in dream')
     
     args = parser.parse_args()
 
@@ -57,6 +69,7 @@ if __name__ == '__main__':
     N_EPOCHS = args.n_epochs
     DATASET_PATH = args.dataset_path
     POLICY_PATH = "ppo_agent.zip"
+    WM_PATH = "dit_wm.pt"
 
     if args.model:
         config = DIT_CONFIGS[args.model]
@@ -65,12 +78,17 @@ if __name__ == '__main__':
         args.depth = config['depth']
         args.num_heads = config['num_heads']
 
-    if args.delete_dataset == True:
+    if args.delete_dataset and os.path.exists(args.dataset_path):
         os.remove(args.dataset_path)
         print(f"- Deleted existing dataset: {args.dataset_path}")
+    
     if args.delete_policy and os.path.exists(POLICY_PATH):
         os.remove(POLICY_PATH)
         print(f"- Deleted existing policy: {POLICY_PATH}")
+
+    if args.delete_wm and os.path.exists(WM_PATH):
+        os.remove(WM_PATH)
+        print(f"- Deleted existing World Model: {WM_PATH}")
 
     if args.pixel_space:
         VAE = None 
@@ -110,6 +128,10 @@ if __name__ == '__main__':
         print(f"      STARTING MBRL LOOP {loop+1}/{args.mbrl_loops}")
         print("="*40)
 
+        if args.clear_dataset_per_loop and os.path.exists(DATASET_PATH):
+            os.remove(DATASET_PATH)
+            print(f"- [MBRL Loop {loop+1}] Cleared dataset (Fresh Rollouts Only).")
+
         print(f"- Collecting {N_ROLLOUTS} rollouts with policy: {POLICY_PATH}")
         env_rollout(ENV_NAME, N_ROLLOUTS, VAE, DATASET_PATH, policy_path=POLICY_PATH)
 
@@ -129,6 +151,7 @@ if __name__ == '__main__':
             patch_size=args.patch_size
         )
 
+        # De aqui en adelante.
         print("- PPO currently dreaming...")
         
         wm_model = DiT_WM(
@@ -144,7 +167,13 @@ if __name__ == '__main__':
         wm_model.load_state_dict(torch.load("dit_wm.pt"))
         wm_model.eval()
 
-        dream_env = DreamEnv(wm_model, VAE, device, args.pixel_space, context_frames=args.context_frames)
+        dream_env = DreamEnv(wm_model, 
+                             VAE, 
+                             device, 
+                             args.pixel_space, 
+                             context_frames=args.context_frames, 
+                             num_steps=args.denoising_steps, 
+                             num_actions=NUM_ACTIONS)
         dream_env = Monitor(dream_env)
         
         print("- Warmup buffer...")
@@ -171,4 +200,3 @@ if __name__ == '__main__':
         agent.save(POLICY_PATH)
         print("- Agent updated and saved.")
 
-    print("\nMBRL Training Complete")
