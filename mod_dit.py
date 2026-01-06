@@ -1,13 +1,9 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import h5py
-import cv2
 import os
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
-from diffusers.models import AutoencoderKL
-from vae import decode_latent
 from atari_dataset import AtariH5Dataset
 from utils import unpatchify
 
@@ -67,7 +63,7 @@ class FinalLayer(nn.Module):
         return self.linear(x)
 
 
-class DiT_WM(nn.Module):
+class ModDiT(nn.Module):
     def __init__(self, num_actions, input_size=8, patch_size=2, in_channels=4, context_frames=4, 
                  hidden_size=384, depth=6, num_heads=6, sigma_data=0.5):
         super().__init__()
@@ -104,20 +100,6 @@ class DiT_WM(nn.Module):
         self.blocks = nn.ModuleList([DiTBlock(hidden_size, num_heads) for _ in range(depth)])
         self.final_layer = FinalLayer(hidden_size, patch_size, in_channels)
 
-        self.reward_head = nn.Sequential(
-            nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, hidden_size),
-            nn.SiLU(),
-            nn.Linear(hidden_size, 1)
-        )
-        
-        self.done_head = nn.Sequential(
-            nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, hidden_size),
-            nn.SiLU(),
-            nn.Linear(hidden_size, 1)
-        )
-
 
     def forward(self, x_noisy, sigma, context, cond_noise_level, target_action, context_actions):
         # EDM preconditioning
@@ -148,20 +130,15 @@ class DiT_WM(nn.Module):
         for block in self.blocks:
             x = block(x, c)
 
-        scene_vector = x.mean(dim=1)
-        pred_reward = self.reward_head(scene_vector)
-        pred_done = self.done_head(scene_vector)
-
         x = self.final_layer(x, c)        
         F_out = unpatchify(x, self.in_channels)
         D_x = c_skip * x_noisy + c_out * F_out
 
         # import torchvision; torchvision.utils.save_image(torch.cat([x_noisy[:1, :3], F_out[:1, :3], D_x[:1, :3]], dim=0), "debug_final_3x.png", normalize=True, nrow=3)
 
-        return D_x, pred_reward, pred_done
+        return D_x
 
-
-def train_dit_wm(dataset_path, num_actions, epochs=10, batch_size=32, val_split=0.1, 
+def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split=0.1, 
                  in_channels=4, context_frames=4, hidden_size=384, depth=6, num_heads=6, 
                  device='cuda', input_size=8, patch_size=2):    
     
@@ -173,17 +150,11 @@ def train_dit_wm(dataset_path, num_actions, epochs=10, batch_size=32, val_split=
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
-    # pos_weight = torch.tensor([50.0]).to(device)
-    # bce_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    bce_loss = nn.BCEWithLogitsLoss()
-    mse_loss = nn.MSELoss()
-
     P_mean = -1.2
     P_std = 1.2
     sigma_data = 0.5
 
-    model = DiT_WM(
+    model = ModDiT(
         input_size=input_size,
         patch_size=patch_size,
         in_channels=in_channels, 
@@ -207,11 +178,12 @@ def train_dit_wm(dataset_path, num_actions, epochs=10, batch_size=32, val_split=
         update_interval = max(1, len(train_loader) // 10)
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", miniters=update_interval)
         
-        for target, context, tgt_act, ctx_acts, r_gt, d_gt in pbar:
+        for target, context, tgt_act, ctx_acts, reward, termination in pbar:
             target, context = target.to(device), context.to(device)
             tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
-            r_gt, d_gt = r_gt.to(device).view(-1, 1), d_gt.to(device).view(-1, 1)
             batch_size = target.shape[0]
+
+            # Add continional through argparser to decide if we want noise augmentation or not
 
             aug_sigma = torch.exp(torch.randn(batch_size, device=device) * P_std + P_mean).view(-1, 1, 1, 1)
             context_noisy = context + aug_sigma * torch.randn_like(context)
@@ -224,13 +196,11 @@ def train_dit_wm(dataset_path, num_actions, epochs=10, batch_size=32, val_split=
 
             # import torchvision; torchvision.utils.save_image(torch.cat([target_noisy[:1], context_noisy[:1, :3]], dim=0), "debug.png", normalize=True)            
 
-            D_x, pred_r, pred_d = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts)
+            D_x = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts)
             weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
 
             loss_img = (weight * ((D_x - target) ** 2)).mean()
-            loss_r = mse_loss(pred_r, r_gt)
-            loss_d = bce_loss(pred_d, d_gt)
-            loss = loss_img + loss_r + loss_d
+            loss = loss_img
 
             optimizer.zero_grad()
             loss.backward()
@@ -238,20 +208,19 @@ def train_dit_wm(dataset_path, num_actions, epochs=10, batch_size=32, val_split=
 
             train_loss_sum += loss.item()
             if pbar.n % update_interval == 0:
-                pbar.set_postfix(img=f"{loss_img.item():.2f}", r=f"{loss_r.item():.2f}", d=f"{loss_d.item():.2f}")
+                pbar.set_postfix(img=f"{loss_img.item():.2f}")
             
         avg_train_loss = train_loss_sum / len(train_loader)
 
         model.eval()
         val_loss_sum = 0
-        val_pbar = tqdm(val_loader, desc=f"Epoch {epoch+1}/{epochs} [Val]", leave=True)
         with torch.no_grad():
-            # for target, context, tgt_act, ctx_acts, r_gt, d_gt in val_loader:
-            for target, context, tgt_act, ctx_acts, r_gt, d_gt in val_pbar:
+            for target, context, tgt_act, ctx_acts, reward, termination in val_loader:
                 target, context = target.to(device), context.to(device)
                 tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
-                r_gt, d_gt = r_gt.to(device).view(-1, 1), d_gt.to(device).view(-1, 1)
                 batch_size = target.shape[0]
+
+                # Add continional through argparser to decide if we want noise augmentation or not
                 
                 aug_sigma = torch.exp(torch.randn(batch_size, device=device) * P_std + P_mean).view(-1, 1, 1, 1)
                 context_noisy = context + aug_sigma * torch.randn_like(context)
@@ -262,24 +231,20 @@ def train_dit_wm(dataset_path, num_actions, epochs=10, batch_size=32, val_split=
                 noise = torch.randn_like(target)
                 target_noisy = target + sigma * noise
                 
-                D_x, pred_r, pred_d = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts)
+                D_x = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts)
 
                 
                 weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
                 loss_img = (weight * ((D_x - target) ** 2)).mean()
-                loss_r = mse_loss(pred_r, r_gt)
-                loss_d = bce_loss(pred_d, d_gt)
-                loss = loss_img + loss_r + loss_d
+                loss = loss_img
                 
                 val_loss_sum += loss.item()
-                val_pbar.set_postfix(img=f"{loss_img.item():.2f}", r=f"{loss_r.item():.2f}", d=f"{loss_d.item():.2f}")
-
 
         avg_val_loss = val_loss_sum / len(val_loader) if len(val_loader) > 0 else 0
         save_msg = ""
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), "dit_wm.pt")
+            torch.save(model.state_dict(), "mod_dit.pt")
             save_msg = "--> Saved Best Model!"
 
         print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.5f} | Val Loss: {avg_val_loss:.5f} {save_msg}")
