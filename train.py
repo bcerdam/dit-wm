@@ -7,23 +7,20 @@ from utils import get_num_actions, DIT_CONFIGS
 
 
 if __name__ == '__main__':
-    # Add/modify arguments for: rl_n_epochs;
     parser = argparse.ArgumentParser(description="Train DiT-WM")
     
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Atari environment ID')
-    parser.add_argument('--n_steps', type=int, default=10000, help='Total environment steps to collect')
+    parser.add_argument('--n_steps', type=int, default=100000, help='Total environment steps to collect')
 
     parser.add_argument('--val_split', type=float, default=0.2, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
     parser.add_argument('--dit_n_epochs', type=int, default=10, help='Training epochs for Dynamics Model')
     parser.add_argument('--batch_size', type=int, default=16, help='Batch size for DiT training')
-    parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--patch_size', type=int, default=8, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Transformer embedding dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of DiT blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of attention heads')
-
-    parser.add_argument('--denoising_steps', type=int, default=3, help='Number of denoising steps')
 
     parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to HDF5 dataset')
     parser.add_argument('--weights_path', type=str, default='mod_dit.pt', help='Path to model weights (denoise mode)')
@@ -69,11 +66,7 @@ if __name__ == '__main__':
         in_channels = 4
         input_size = 8
 
-    # Do a loop with Data collection with random policy
     env_rollout(ENV_NAME, N_STEPS, VAE, DATASET_PATH, policy_path=None)
-
-    # DiT as dynamics model
-    # change function name, as DiT is not the world model as a whole.
     train_mod_dit(
         args.dataset_path, 
         num_actions=NUM_ACTIONS,
@@ -89,7 +82,5 @@ if __name__ == '__main__':
         patch_size=args.patch_size
     )
 
-    # Reward and Termination Model
 
-    # RL
 

@@ -85,13 +85,6 @@ class ModDiT(nn.Module):
             nn.SiLU(), 
             nn.Linear(hidden_size, hidden_size)
         )
-        # Noise augmentation for context
-        self.cond_noise_map = nn.Sequential(
-            FourierEmbedding(256), 
-            nn.Linear(256, hidden_size), 
-            nn.SiLU(), 
-            nn.Linear(hidden_size, hidden_size)
-        )
         
         self.act_embedder = nn.Embedding(num_actions, hidden_size)
         self.ctx_act_embedder = nn.Embedding(num_actions, hidden_size)
@@ -101,7 +94,7 @@ class ModDiT(nn.Module):
         self.final_layer = FinalLayer(hidden_size, patch_size, in_channels)
 
 
-    def forward(self, x_noisy, sigma, context, cond_noise_level, target_action, context_actions):
+    def forward(self, x_noisy, sigma, context, target_action, context_actions):
         # EDM preconditioning
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
         c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
@@ -111,20 +104,16 @@ class ModDiT(nn.Module):
         c_skip = c_skip.view(-1, 1, 1, 1)
         c_out = c_out.view(-1, 1, 1, 1)
         F_x = c_in * x_noisy
-        # import torchvision; torchvision.utils.save_image(F_x[:1], "debug_Fx.png", normalize=True)
 
         model_input = torch.cat([F_x, context], dim=1)
 
         # EDM Noise mapping
         sigma_vec = self.sigma_map(c_noise)
-        # Noise augmentation mapping
-        cond_noise_vec = self.cond_noise_map(cond_noise_level.log() / 4.0)
 
         act_vec = self.act_embedder(target_action)
         ctx_vec = self.ctx_act_proj(self.ctx_act_embedder(context_actions).flatten(1))
-        c = sigma_vec + cond_noise_vec + act_vec + ctx_vec
+        c = sigma_vec + act_vec + ctx_vec
         
-        # From here on
         x = self.x_embedder(model_input).flatten(2).transpose(1, 2)
         x = x + self.pos_embed
         for block in self.blocks:
@@ -133,8 +122,6 @@ class ModDiT(nn.Module):
         x = self.final_layer(x, c)        
         F_out = unpatchify(x, self.in_channels)
         D_x = c_skip * x_noisy + c_out * F_out
-
-        # import torchvision; torchvision.utils.save_image(torch.cat([x_noisy[:1, :3], F_out[:1, :3], D_x[:1, :3]], dim=0), "debug_final_3x.png", normalize=True, nrow=3)
 
         return D_x
 
@@ -183,20 +170,12 @@ def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split
             tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
             batch_size = target.shape[0]
 
-            # Add continional through argparser to decide if we want noise augmentation or not
-
-            aug_sigma = torch.exp(torch.randn(batch_size, device=device) * P_std + P_mean).view(-1, 1, 1, 1)
-            context_noisy = context + aug_sigma * torch.randn_like(context)
-            cond_noise_level = aug_sigma.view(-1)
-
             rnd_normal = torch.randn([batch_size, 1, 1, 1], device=device)
             sigma = (rnd_normal * P_std + P_mean).exp()
             noise = torch.randn_like(target)
             target_noisy = target + sigma * noise
 
-            # import torchvision; torchvision.utils.save_image(torch.cat([target_noisy[:1], context_noisy[:1, :3]], dim=0), "debug.png", normalize=True)            
-
-            D_x = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts)
+            D_x = model(target_noisy, sigma.view(-1), context, tgt_act, ctx_acts)
             weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
 
             loss_img = (weight * ((D_x - target) ** 2)).mean()
@@ -220,20 +199,13 @@ def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split
                 tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
                 batch_size = target.shape[0]
 
-                # Add continional through argparser to decide if we want noise augmentation or not
-                
-                aug_sigma = torch.exp(torch.randn(batch_size, device=device) * P_std + P_mean).view(-1, 1, 1, 1)
-                context_noisy = context + aug_sigma * torch.randn_like(context)
-                cond_noise_level = aug_sigma.view(-1)
-
                 rnd_normal = torch.randn([batch_size, 1, 1, 1], device=device)
                 sigma = (rnd_normal * P_std + P_mean).exp()
                 noise = torch.randn_like(target)
                 target_noisy = target + sigma * noise
                 
-                D_x = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts)
+                D_x = model(target_noisy, sigma.view(-1), context, tgt_act, ctx_acts)
 
-                
                 weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
                 loss_img = (weight * ((D_x - target) ** 2)).mean()
                 loss = loss_img

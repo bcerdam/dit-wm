@@ -205,7 +205,7 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
             sigma_cur = t_steps[i]
             sigma_next = t_steps[i + 1]
             
-            D_x = model(latents, sigma_cur.view(-1), context, cond_noise_level, tgt_act, ctx_acts)
+            D_x = model(latents, sigma_cur.view(-1), context, tgt_act, ctx_acts)
             
             d_cur = (latents - D_x) / sigma_cur
             latents = latents + (sigma_next - sigma_cur) * d_cur
@@ -258,7 +258,7 @@ def edm_sampler(model, context, target_action, ctx_acts, device, input_size, in_
         sigma_next = t_steps[i + 1]
         
         with torch.no_grad():
-            D_x = model(latents, sigma_cur.view(-1), context, cond_noise_level, target_action, ctx_acts)
+            D_x = model(latents, sigma_cur.view(-1), context, target_action, ctx_acts)
         
         d_cur = (latents - D_x) / sigma_cur
         latents = latents + (sigma_next - sigma_cur) * d_cur
@@ -296,6 +296,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
             action, _ = agent.predict(img, deterministic=True)
             action = int(action)
         else:
+            # action = 3
             action = env.action_space.sample()
             
         real_actions.append(action)
@@ -336,6 +337,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
                 next_action_val = np.random.randint(0, num_actions)
         else:
             next_action_val = np.random.randint(0, num_actions)
+            # next_action_val = 0
 
         tgt_act_input = torch.tensor([next_action_val], device=device).long()
         
@@ -370,13 +372,12 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
 
 
 if __name__ == "__main__":
-    # parser argument names consistensies with train.py
     parser = argparse.ArgumentParser(description="Atari Dataset Utilities")
     parser.add_argument('mode', choices=['inspect', 'video', 'denoise', 'dream'], help='Select utility function to run')
 
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
-    parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--patch_size', type=int, default=8, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
