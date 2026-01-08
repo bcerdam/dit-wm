@@ -40,18 +40,10 @@ def unpatchify(x, channels):
 
 
 def inspect_dataset(file_path):
-    if not os.path.exists(file_path):
-        print(f"Error: File '{file_path}' not found.")
-        return
-
     with h5py.File(file_path, 'r') as f:
         print(f"\nInspecting: {file_path}")
         print("=" * 60)
         
-        if len(f.keys()) == 0:
-            print("(!) File is empty.")
-            return
-
         for key in f.keys():
             print(f"Key: {key:<12} | Shape: {str(f[key].shape):<18} | Type: {f[key].dtype}")
 
@@ -78,41 +70,7 @@ def inspect_dataset(file_path):
         print("=" * 60)
         
 
-def create_video(dataset_path, output_filename, rollout_idx, vae, device='cuda'):
-    with h5py.File(dataset_path, 'r') as f:
-        dones = np.array(f['terminated'])
-        term_indices = np.where(dones)[0]
-        
-        if rollout_idx == 0:
-            start_idx = 0
-            end_idx = term_indices[0] + 1
-        else:
-            if rollout_idx >= len(term_indices):
-                print(f"Error: Rollout {rollout_idx} not found. Total episodes: {len(term_indices)}")
-                return
-            start_idx = term_indices[rollout_idx - 1] + 1
-            end_idx = term_indices[rollout_idx] + 1
-
-        print(f"Rendering Rollout {rollout_idx}: Steps {start_idx} to {end_idx} ({end_idx - start_idx} frames)")
-
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_filename, fourcc, 30.0, (64, 64))
-
-        latents = f['latents'][start_idx:end_idx]
-        
-        for i in tqdm(range(len(latents))):
-            latent_batch = np.expand_dims(latents[i], axis=0)
-            
-            img = decode_latent(latent_batch, vae, device=device)
-            
-            img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-            out.write(img_bgr)
-
-        out.release()
-        print(f"Video saved to {output_filename}")
-
-
-def create_video_pixel(dataset_path, output_filename, rollout_idx):
+def create_video(dataset_path, output_filename, rollout_idx, vae, device='cuda', pixel_space=False):
     with h5py.File(dataset_path, 'r') as f:
         dones = np.array(f['terminated'])
         term_indices = np.where(dones)[0]
@@ -134,46 +92,38 @@ def create_video_pixel(dataset_path, output_filename, rollout_idx):
         raw_frames = f['observations'][start_idx:end_idx]
         
         for i in tqdm(range(len(raw_frames))):
-            frame = raw_frames[i]
-            img_hwc = np.transpose(frame, (1, 2, 0)) 
-            
-            if img_hwc.dtype != np.uint8:
-                img_hwc = img_hwc.astype(np.uint8)
 
-            img_bgr = cv2.cvtColor(img_hwc, cv2.COLOR_RGB2BGR)
-            
-            out.write(img_bgr)
+            if pixel_space == True:
+                frame = raw_frames[i]
+                img_hwc = np.transpose(frame, (1, 2, 0)) 
+                
+                if img_hwc.dtype != np.uint8:
+                    img_hwc = img_hwc.astype(np.uint8)
+
+                img_bgr = cv2.cvtColor(img_hwc, cv2.COLOR_RGB2BGR)
+                out.write(img_bgr)
+            else:
+                latent_batch = np.expand_dims(raw_frames[i], axis=0)
+                img = decode_latent(latent_batch, vae, device=device)
+                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                out.write(img_bgr)
 
         out.release()
         print(f"Video saved to {output_filename}")
 
     
-def visualize_denoising(model, weights_path, dataset_path, output_filename='denoising.mp4', device='cuda', env_name=None, num_steps=50, pixel_space=False):
+def visualize_denoising(model, weights_path, output_filename='denoising.mp4', device='cuda', env_name=None, num_steps=50, pixel_space=False):
     vae = None
     if not pixel_space:
-        print(f"Loading VAE on {device}...")
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
-    else:
-        print("(!) Visualizing in PIXEL SPACE (No VAE).")
 
-    temp_file = "temp_honest_eval.h5"
-    if env_name:
-        print(f"(!) Generating FRESH rollout from {env_name} to ensure unseen data...")
-        if os.path.exists(temp_file): os.remove(temp_file)
-        env_rollout(env_name, 1, vae, temp_file, policy_path='ppo_agent.zip')
-        dataset_path = temp_file
-
-    print(f"Creating denoising video from {weights_path} using {dataset_path}...")
-    
+    temp_file = "temp_eval.h5"
+    env_rollout(env_name, 1, vae, temp_file)
     model.load_state_dict(torch.load(weights_path, map_location=device))
     model.to(device)
     model.eval()
 
-    dataset = AtariH5Dataset(dataset_path)
-    if len(dataset) == 0:
-        print("Error: Dataset is empty.")
-        return
-
+    dataset = AtariH5Dataset(temp_file)
     rand_idx = np.random.randint(0, len(dataset))
     target_clean, context, tgt_act, ctx_acts, _, _ = dataset[rand_idx]
     
@@ -191,8 +141,6 @@ def visualize_denoising(model, weights_path, dataset_path, output_filename='deno
     step_indices = torch.arange(num_steps, dtype=torch.float64, device=device)
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
     t_steps = torch.cat([t_steps, torch.zeros_like(t_steps[:1])]).float()
-
-    cond_noise_level = torch.tensor([1e-5], device=device)
     
     fps = 10.0
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -250,9 +198,6 @@ def edm_sampler(model, context, target_action, ctx_acts, device, input_size, in_
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
     t_steps = torch.cat([t_steps, torch.zeros_like(t_steps[:1])]).float()
     
-    cond_noise_level = torch.tensor([1e-5], device=device)
-
-    D_x = None
     for i in range(num_steps):
         sigma_cur = t_steps[i]
         sigma_next = t_steps[i + 1]
@@ -267,27 +212,22 @@ def edm_sampler(model, context, target_action, ctx_acts, device, input_size, in_
 
 
 def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_space=False, context_frames=4, num_steps=50, policy_path=None):
-    agent = None
-    policy_name = "Random Policy"
-    if policy_path:
-        try:
-            print(f"(!) Loading PPO Agent from {policy_path}...")
-            agent = PPO.load(policy_path)
-            policy_name = "PPO Agent"
-        except Exception as e:
-            print(f"(!) Failed to load policy: {e}. Defaulting to Random.")
 
-    print(f"(!) Dreaming {steps} frames ({policy_name}, {num_steps} denoising steps)...")
-    
+    if policy_path:
+        agent = PPO.load(policy_path)
+        policy_name = "PPO Agent"
+    else:
+        agent = None
+        policy_name = "Random Policy"
+
+
+    print(f"- Dreaming {steps} frames ({policy_name}, {num_steps} denoising steps)...")
     env = gym.make(env_name, render_mode='rgb_array')
-    num_actions = env.action_space.n
-    print(f"(!) Detected {num_actions} valid actions for {env_name}.")
-    
+    num_actions = env.action_space.n    
     obs, _ = env.reset()
     
     real_frames = []
     real_actions = []
-    
     for _ in range(context_frames):
         img = cv2.resize(obs, (64, 64))
         real_frames.append(img)
@@ -329,15 +269,17 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
             
             if pixel_space:
                 obs_tensor = (last_frame_tensor + 1.0) / 2.0 * 255.0
-                obs_np = obs_tensor.clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy() # [H, W, C]
+                obs_np = obs_tensor.clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
                 
                 action, _ = agent.predict(obs_np, deterministic=True)
                 next_action_val = int(action)
             else:
+                # Missing logic for latent space world model
                 next_action_val = np.random.randint(0, num_actions)
         else:
+            # for debugging purposes
             next_action_val = np.random.randint(0, num_actions)
-            # next_action_val = 0
+            # next_action_val = 3
 
         tgt_act_input = torch.tensor([next_action_val], device=device).long()
         
@@ -377,7 +319,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
-    parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--patch_size', type=int, default=8, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
@@ -409,7 +351,7 @@ if __name__ == "__main__":
 
     if args.model:
         config = DIT_CONFIGS[args.model]
-        print(f"(!) Using standard configuration for {args.model}")
+        print(f"- Using standard configuration for {args.model}")
         args.hidden_size = config['hidden_size']
         args.depth = config['depth']
         args.num_heads = config['num_heads']
@@ -418,17 +360,11 @@ if __name__ == "__main__":
         inspect_dataset(args.dataset_path)
         
     elif args.mode == 'video':
-        if args.pixel_space:
-            create_video_pixel(args.dataset_path, args.output, args.rollout_idx)
-        else:
-            print(f"Loading VAE on {device}...")
-            vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
-            create_video(args.dataset_path, args.output, args.rollout_idx, vae, device)
-
+        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
+        create_video(args.dataset_path, args.output, args.rollout_idx, vae, device, args.pixel_space)
         
     elif args.mode == 'denoise':
         from mod_dit import ModDiT
-        print(f"Initializing Model (H={args.hidden_size}, D={args.depth}, Patch={args.patch_size}, Pixel={args.pixel_space})...")
         
         model = ModDiT(
             in_channels=in_channels, 
@@ -445,7 +381,6 @@ if __name__ == "__main__":
         visualize_denoising(
             model, 
             args.weights_path, 
-            args.dataset_path, 
             args.output, 
             device=device, 
             env_name=args.env_name, 
