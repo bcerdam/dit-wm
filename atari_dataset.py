@@ -20,7 +20,6 @@ class AtariH5Dataset(Dataset):
         end_idx = idx + self.context_len
         raw_frames = self.observations[idx:end_idx+1]
         
-        # Manually check this.
         if raw_frames.dtype == 'uint8':
             frames = torch.tensor(raw_frames).float() / 127.5 - 1.0
         else:
@@ -28,7 +27,9 @@ class AtariH5Dataset(Dataset):
 
         actions = torch.tensor(self.actions[idx:end_idx+1])
         reward = torch.tensor(self.rewards[end_idx]).float()
+        raw_rewards = torch.tensor(self.rewards[idx:end_idx+1]).float()
         done = torch.tensor(self.terminated[end_idx]).float()
+        raw_dones = torch.tensor(self.terminated[idx:end_idx+1]).float()
         
         target_obs = frames[-1]
         target_action = actions[-1].long()
@@ -36,5 +37,7 @@ class AtariH5Dataset(Dataset):
         h, w = frames.shape[-2], frames.shape[-1]
         context_obs = frames[:-1].reshape(-1, h, w)
         context_actions = actions[:-1].long()
+        context_rewards = raw_rewards[:-1].unsqueeze(-1)
+        context_dones = raw_dones[:-1].long()
         
-        return target_obs, context_obs, target_action, context_actions, reward, done
+        return target_obs, context_obs, target_action, context_actions, reward, done, context_rewards, context_dones

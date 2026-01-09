@@ -85,16 +85,35 @@ class ModDiT(nn.Module):
             nn.SiLU(), 
             nn.Linear(hidden_size, hidden_size)
         )
+
+        self.cond_noise_map = nn.Sequential(
+            FourierEmbedding(256), 
+            nn.Linear(256, hidden_size), 
+            nn.SiLU(), 
+            nn.Linear(hidden_size, hidden_size)
+        )
         
         self.act_embedder = nn.Embedding(num_actions, hidden_size)
         self.ctx_act_embedder = nn.Embedding(num_actions, hidden_size)
         self.ctx_act_proj = nn.Linear(hidden_size * context_frames, hidden_size)
 
+        self.ctx_reward_embedder = nn.Linear(1, hidden_size)
+        self.ctx_reward_proj = nn.Linear(hidden_size * context_frames, hidden_size)
+
+        self.ctx_done_embedder = nn.Embedding(2, hidden_size) 
+        self.ctx_done_proj = nn.Linear(hidden_size * context_frames, hidden_size)
+
         self.blocks = nn.ModuleList([DiTBlock(hidden_size, num_heads) for _ in range(depth)])
         self.final_layer = FinalLayer(hidden_size, patch_size, in_channels)
 
+        self.reward_head = nn.Sequential(
+            nn.LayerNorm(hidden_size), nn.Linear(hidden_size, hidden_size), nn.SiLU(), nn.Linear(hidden_size, 1)
+        )
+        self.done_head = nn.Sequential(
+            nn.LayerNorm(hidden_size), nn.Linear(hidden_size, hidden_size), nn.SiLU(), nn.Linear(hidden_size, 1)
+        )
 
-    def forward(self, x_noisy, sigma, context, target_action, context_actions):
+    def forward(self, x_noisy, sigma, context, cond_noise_level, target_action, context_actions, context_rewards, context_dones):
         # EDM preconditioning
         c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
         c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
@@ -110,20 +129,28 @@ class ModDiT(nn.Module):
         # EDM Noise mapping
         sigma_vec = self.sigma_map(c_noise)
 
+        cond_noise_vec = self.cond_noise_map(cond_noise_level.log() / 4.0)
+
         act_vec = self.act_embedder(target_action)
-        ctx_vec = self.ctx_act_proj(self.ctx_act_embedder(context_actions).flatten(1))
-        c = sigma_vec + act_vec + ctx_vec
+        ctx_act_vec = self.ctx_act_proj(self.ctx_act_embedder(context_actions).flatten(1))
+        ctx_rew_vec = self.ctx_reward_proj(self.ctx_reward_embedder(context_rewards).flatten(1))
+        ctx_done_vec = self.ctx_done_proj(self.ctx_done_embedder(context_dones).flatten(1))
+        c = sigma_vec + cond_noise_vec + act_vec + ctx_act_vec + ctx_rew_vec + ctx_done_vec
         
         x = self.x_embedder(model_input).flatten(2).transpose(1, 2)
         x = x + self.pos_embed
         for block in self.blocks:
             x = block(x, c)
 
+        scene_vector = x.mean(dim=1)
+        pred_reward = self.reward_head(scene_vector)
+        pred_done = self.done_head(scene_vector)
+
         x = self.final_layer(x, c)        
         F_out = unpatchify(x, self.in_channels)
         D_x = c_skip * x_noisy + c_out * F_out
 
-        return D_x
+        return D_x, pred_reward, pred_done
 
 def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split=0.1, 
                  in_channels=4, context_frames=4, hidden_size=384, depth=6, num_heads=6, 
@@ -153,10 +180,10 @@ def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split
         sigma_data=sigma_data
     ).to(device)
 
-    if os.path.exists("dit_wm.pt"):
-        model.load_state_dict(torch.load("dit_wm.pt"))
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+    mse_loss = nn.MSELoss()
+    bce_loss = nn.BCEWithLogitsLoss()
 
     best_val_loss = float('inf')
     for epoch in range(epochs):
@@ -165,21 +192,31 @@ def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split
         update_interval = max(1, len(train_loader) // 10)
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}", miniters=update_interval)
         
-        for target, context, tgt_act, ctx_acts, reward, termination in pbar:
+        for target, context, tgt_act, ctx_acts, reward, termination, ctx_rews, ctx_dones in pbar:
             target, context = target.to(device), context.to(device)
             tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
+            tgt_rew = reward.to(device).view(-1, 1)
+            tgt_done = termination.to(device).view(-1, 1)
+            ctx_rews = ctx_rews.to(device)
+            ctx_dones = ctx_dones.to(device)
             batch_size = target.shape[0]
+
+            aug_sigma = torch.exp(torch.randn(batch_size, device=device) * P_std + P_mean).view(-1, 1, 1, 1)
+            context_noisy = context + aug_sigma * torch.randn_like(context)
+            cond_noise_level = aug_sigma.view(-1)
 
             rnd_normal = torch.randn([batch_size, 1, 1, 1], device=device)
             sigma = (rnd_normal * P_std + P_mean).exp()
             noise = torch.randn_like(target)
             target_noisy = target + sigma * noise
 
-            D_x = model(target_noisy, sigma.view(-1), context, tgt_act, ctx_acts)
+            D_x, pred_r, pred_d = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts, ctx_rews, ctx_dones)
             weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
 
             loss_img = (weight * ((D_x - target) ** 2)).mean()
-            loss = loss_img
+            loss_r = mse_loss(pred_r, tgt_rew)
+            loss_d = bce_loss(pred_d, tgt_done)
+            loss = loss_img + loss_r + loss_d
 
             optimizer.zero_grad()
             loss.backward()
@@ -187,30 +224,43 @@ def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split
 
             train_loss_sum += loss.item()
             if pbar.n % update_interval == 0:
-                pbar.set_postfix(img=f"{loss_img.item():.2f}")
+                pbar.set_postfix(img=f"{loss_img.item():.2f}", r=f"{loss_r.item():.2f}", d=f"{loss_d.item():.2f}")
             
         avg_train_loss = train_loss_sum / len(train_loader)
 
         model.eval()
         val_loss_sum = 0
         with torch.no_grad():
-            for target, context, tgt_act, ctx_acts, reward, termination in val_loader:
+            for target, context, tgt_act, ctx_acts, reward, termination, ctx_rews, ctx_dones in val_loader:
                 target, context = target.to(device), context.to(device)
                 tgt_act, ctx_acts = tgt_act.to(device), ctx_acts.to(device)
+                tgt_rew = reward.to(device).view(-1, 1)
+                tgt_done = termination.to(device).view(-1, 1)
+                ctx_rews = ctx_rews.to(device)
+                ctx_dones = ctx_dones.to(device)
                 batch_size = target.shape[0]
+
+
+                aug_sigma = torch.exp(torch.randn(batch_size, device=device) * P_std + P_mean).view(-1, 1, 1, 1)
+                context_noisy = context + aug_sigma * torch.randn_like(context)
+                cond_noise_level = aug_sigma.view(-1)
 
                 rnd_normal = torch.randn([batch_size, 1, 1, 1], device=device)
                 sigma = (rnd_normal * P_std + P_mean).exp()
                 noise = torch.randn_like(target)
                 target_noisy = target + sigma * noise
-                
-                D_x = model(target_noisy, sigma.view(-1), context, tgt_act, ctx_acts)
+
+                D_x, pred_r, pred_d = model(target_noisy, sigma.view(-1), context_noisy, cond_noise_level, tgt_act, ctx_acts, ctx_rews, ctx_dones)
+
 
                 weight = (sigma ** 2 + sigma_data ** 2) / (sigma * sigma_data) ** 2
                 loss_img = (weight * ((D_x - target) ** 2)).mean()
-                loss = loss_img
+                loss_r = mse_loss(pred_r, tgt_rew)
+                loss_d = bce_loss(pred_d, tgt_done)
                 
-                val_loss_sum += loss.item()
+                total_loss = loss_img + loss_r + loss_d
+                val_loss_sum += total_loss.item()
+                
 
         avg_val_loss = val_loss_sum / len(val_loader) if len(val_loader) > 0 else 0
         save_msg = ""
