@@ -13,11 +13,11 @@ if __name__ == '__main__':
     parser.add_argument('--n_steps', type=int, default=100000, help='Total environment steps to collect')
 
     parser.add_argument('--val_split', type=float, default=0.2, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
-    parser.add_argument('--dit_n_epochs', type=int, default=10, help='Training epochs for Dynamics Model')
+    parser.add_argument('--dit_n_epochs', type=int, default=50, help='Training epochs for Dynamics Model')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size for DiT training')
-    parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
-    parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
-    parser.add_argument('--patch_size', type=int, default=8, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
+    parser.add_argument('--model', type=str, default='DiT-L', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--context_frames', type=int, default=64, help='Number of history frames')
+    parser.add_argument('--patch_size', type=int, default=2, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Transformer embedding dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of DiT blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of attention heads')
@@ -25,13 +25,13 @@ if __name__ == '__main__':
     parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to HDF5 dataset')
     parser.add_argument('--weights_path', type=str, default='mod_dit.pt', help='Path to model weights (denoise mode)')
     
-    parser.add_argument('--delete_dataset', action='store_true', default=True, help='If set, deletes existing dataset')
+    parser.add_argument('--delete_dataset', action='store_true', default=False, help='If set, deletes existing dataset')
     parser.add_argument('--keep_dataset', action='store_false', dest='delete_dataset', help='Keep existing dataset')
 
     parser.add_argument('--delete_dit_weights', action='store_true', default=True, help='If set, deletes existing DiT weights')
     parser.add_argument('--keep_dit_weights', action='store_false', dest='delete_dit_weights', help='Keep existing DiT weights')
     
-    parser.add_argument('--pixel_space', type=bool, default=True, help='If set, trains on 64x64 RGB pixels instead of VAE latents')
+    parser.add_argument('--pixel_space', type=bool, default=False, help='If set, trains on 64x64 RGB pixels instead of VAE latents')
     
     args = parser.parse_args()
 

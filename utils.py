@@ -377,8 +377,8 @@ if __name__ == "__main__":
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
     parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
-    parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
-    parser.add_argument('--patch_size', type=int, default=8, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
+    parser.add_argument('--context_frames', type=int, default=64, help='Number of history frames')
+    parser.add_argument('--patch_size', type=int, default=2, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of heads')
@@ -391,7 +391,7 @@ if __name__ == "__main__":
     parser.add_argument('--output', type=str, default='output.mp4', help='Output video filename')
     parser.add_argument('--rollout_idx', type=int, default=0, help='Rollout index (video mode)')
     parser.add_argument('--max_frames', type=int, default=100, help='Number of frames to dream')
-    parser.add_argument('--pixel_space', type=bool, default=True, help='Use if model is trained on pixels (64x64)')
+    parser.add_argument('--pixel_space', type=bool, default=False, help='Use if model is trained on pixels (64x64)')
 
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -472,6 +472,7 @@ if __name__ == "__main__":
             device, 
             steps=args.max_frames, 
             pixel_space=args.pixel_space, 
-            num_steps=args.denoising_steps
+            num_steps=args.denoising_steps,
+            context_frames=args.context_frames
         )
     
