@@ -154,7 +154,7 @@ class ModDiT(nn.Module):
 
 def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split=0.1, 
                  in_channels=4, context_frames=4, hidden_size=384, depth=6, num_heads=6, 
-                 device='cuda', input_size=8, patch_size=2):    
+                 device='cuda', input_size=8, patch_size=2, weights_path='mod_dit.pt'):  
     
     full_dataset = AtariH5Dataset(dataset_path, context_len=context_frames)
     val_size = int(len(full_dataset) * val_split)
@@ -179,6 +179,12 @@ def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split
         num_actions=num_actions,
         sigma_data=sigma_data
     ).to(device)
+
+    if os.path.exists(weights_path):
+        print(f"- Loading existing weights from {weights_path}...")
+        model.load_state_dict(torch.load(weights_path, map_location=device))
+    else:
+        print("- No existing weights found. Starting from scratch...")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
 

@@ -240,7 +240,7 @@ def edm_sampler(model, context, target_action, ctx_acts, ctx_rews, ctx_dones, de
 def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_space=False, context_frames=4, num_steps=50, policy_path=None):
 
     if policy_path:
-        agent = PPO.load(policy_path)
+        agent = PPO.load(policy_path, device=device)
         policy_name = "PPO Agent"
     else:
         agent = None
@@ -308,8 +308,13 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
                 action, _ = agent.predict(obs_np, deterministic=True)
                 next_action_val = int(action)
             else:
-                # Missing logic for latent space world model
-                next_action_val = np.random.randint(0, num_actions)
+                with torch.no_grad():
+                    lat = last_frame_tensor.unsqueeze(0) / 0.18215 
+                    decoded = vae.decode(lat).sample
+                    img = (decoded[0] / 2 + 0.5) * 255.0
+                    img_np = img.clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
+                    action, _ = agent.predict(img_np, deterministic=True)
+            next_action_val = int(action)
         else:
             # for debugging purposes
             next_action_val = np.random.randint(0, num_actions)
@@ -376,8 +381,8 @@ if __name__ == "__main__":
 
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
-    parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
-    parser.add_argument('--context_frames', type=int, default=64, help='Number of history frames')
+    parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--patch_size', type=int, default=2, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of blocks')
@@ -390,8 +395,10 @@ if __name__ == "__main__":
     parser.add_argument('--weights_path', type=str, default='mod_dit.pt', help='Path to model weights (denoise mode)')
     parser.add_argument('--output', type=str, default='output.mp4', help='Output video filename')
     parser.add_argument('--rollout_idx', type=int, default=0, help='Rollout index (video mode)')
-    parser.add_argument('--max_frames', type=int, default=100, help='Number of frames to dream')
+    parser.add_argument('--max_frames', type=int, default=1000, help='Number of frames to dream')
     parser.add_argument('--pixel_space', type=bool, default=False, help='Use if model is trained on pixels (64x64)')
+
+    parser.add_argument('--policy_path', type=str, default='ppo_dream_agent.zip', help='Path to trained PPO agent for dreaming')
 
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -473,6 +480,7 @@ if __name__ == "__main__":
             steps=args.max_frames, 
             pixel_space=args.pixel_space, 
             num_steps=args.denoising_steps,
-            context_frames=args.context_frames
+            context_frames=args.context_frames,
+            policy_path=args.policy_path
         )
     
