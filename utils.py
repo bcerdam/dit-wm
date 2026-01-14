@@ -125,20 +125,12 @@ def visualize_denoising(model, weights_path, output_filename='denoising.mp4', de
 
     dataset = AtariH5Dataset(temp_file)
     rand_idx = np.random.randint(0, len(dataset))
-    target_clean, context, tgt_act, ctx_acts, reward, done, context_rewards, context_dones = dataset[rand_idx]
-    
+    target_clean, context, tgt_act, ctx_acts, _, _ = dataset[rand_idx]
     
     target_clean = target_clean.unsqueeze(0).to(device)
     context = context.unsqueeze(0).to(device)
     tgt_act = tgt_act.unsqueeze(0).to(device)
     ctx_acts = ctx_acts.unsqueeze(0).to(device)
-
-    reward = reward.unsqueeze(0).to(device)
-    done = done.unsqueeze(0).to(device)
-    context_rewards = context_rewards.unsqueeze(0).to(device)
-    context_dones = context_dones.unsqueeze(0).to(device)
-
-    cond_noise_level = torch.tensor([1e-5], device=device)
 
     sigma_min = 0.002
     sigma_max = 80.0
@@ -161,16 +153,7 @@ def visualize_denoising(model, weights_path, output_filename='denoising.mp4', de
             sigma_cur = t_steps[i]
             sigma_next = t_steps[i + 1]
             
-            D_x, pred_reward, pred_done = model(
-                latents, 
-                sigma_cur.view(-1), 
-                context, 
-                cond_noise_level,
-                tgt_act, 
-                ctx_acts, 
-                context_rewards, 
-                context_dones
-            )
+            D_x = model(latents, sigma_cur.view(-1), context, tgt_act, ctx_acts)
             
             d_cur = (latents - D_x) / sigma_cur
             latents = latents + (sigma_next - sigma_cur) * d_cur
@@ -202,7 +185,7 @@ def visualize_denoising(model, weights_path, output_filename='denoising.mp4', de
         os.remove(temp_file)
 
 
-def edm_sampler(model, context, target_action, ctx_acts, ctx_rews, ctx_dones, device, input_size, in_channels, num_steps=50):
+def edm_sampler(model, context, target_action, ctx_acts, device, input_size, in_channels, num_steps=50):
     sigma_min = 0.002
     sigma_max = 80.0
     rho = 7.0
@@ -214,33 +197,24 @@ def edm_sampler(model, context, target_action, ctx_acts, ctx_rews, ctx_dones, de
 
     t_steps = (sigma_max ** (1 / rho) + step_indices / (num_steps - 1) * (sigma_min ** (1 / rho) - sigma_max ** (1 / rho))) ** rho
     t_steps = torch.cat([t_steps, torch.zeros_like(t_steps[:1])]).float()
-    cond_noise_level = torch.tensor([1e-5], device=device)
+    
     for i in range(num_steps):
         sigma_cur = t_steps[i]
         sigma_next = t_steps[i + 1]
         
         with torch.no_grad():
-            D_x, pred_r, pred_d = model(
-                latents, 
-                sigma_cur.view(-1), 
-                context, 
-                cond_noise_level,
-                target_action, 
-                ctx_acts, 
-                ctx_rews, 
-                ctx_dones
-            )
+            D_x = model(latents, sigma_cur.view(-1), context, target_action, ctx_acts)
         
         d_cur = (latents - D_x) / sigma_cur
         latents = latents + (sigma_next - sigma_cur) * d_cur
         
-    return D_x, pred_r, pred_d
+    return D_x
 
 
 def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_space=False, context_frames=4, num_steps=50, policy_path=None):
 
     if policy_path:
-        agent = PPO.load(policy_path, device=device)
+        agent = PPO.load(policy_path)
         policy_name = "PPO Agent"
     else:
         agent = None
@@ -254,8 +228,6 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
     
     real_frames = []
     real_actions = []
-    real_rewards = []
-    real_dones = []
     for _ in range(context_frames):
         img = cv2.resize(obs, (64, 64))
         real_frames.append(img)
@@ -269,9 +241,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
             
         real_actions.append(action)
         
-        obs, reward, done, truncated, _ = env.step(action)
-        real_rewards.append(reward)
-        real_dones.append(done or truncated)
+        obs, _, done, _, _ = env.step(action)
         if done: obs, _ = env.reset()
 
     env.close()
@@ -284,8 +254,6 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
         current_latents = torch.tensor(batch_encode(real_frames, vae, device)).to(device)
         
     current_actions = torch.tensor(real_actions).to(device).long().unsqueeze(0)
-    current_rewards = torch.tensor(real_rewards).to(device).float().view(1, -1, 1) # [1, T, 1]
-    current_dones = torch.tensor(real_dones).to(device).long().view(1, -1)     # [1, T]
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_filename, fourcc, 10.0, (64, 64))
@@ -294,9 +262,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
     for i in pbar:
         recent_frames = current_latents[-context_frames:] 
         ctx_input = recent_frames.reshape(1, -1, recent_frames.shape[2], recent_frames.shape[3])
-        ctx_act_input = current_actions[:, -context_frames:]
-        ctx_rew_input = current_rewards[:, -context_frames:, :]
-        ctx_done_input = current_dones[:, -context_frames:]
+        ctx_act_input = current_actions[:, -context_frames:] 
         
         if agent:
             last_frame_tensor = current_latents[-1]
@@ -308,13 +274,8 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
                 action, _ = agent.predict(obs_np, deterministic=True)
                 next_action_val = int(action)
             else:
-                with torch.no_grad():
-                    lat = last_frame_tensor.unsqueeze(0) / 0.18215 
-                    decoded = vae.decode(lat).sample
-                    img = (decoded[0] / 2 + 0.5) * 255.0
-                    img_np = img.clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
-                    action, _ = agent.predict(img_np, deterministic=True)
-            next_action_val = int(action)
+                # Missing logic for latent space world model
+                next_action_val = np.random.randint(0, num_actions)
         else:
             # for debugging purposes
             next_action_val = np.random.randint(0, num_actions)
@@ -325,28 +286,17 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
         input_size = 64 if pixel_space else 8
         in_channels = 3 if pixel_space else 4
         
-        new_frame, pred_r, pred_d = edm_sampler(
-            model, ctx_input, tgt_act_input, ctx_act_input, ctx_rew_input, ctx_done_input,
-            device, input_size, in_channels, num_steps=num_steps
+        new_frame = edm_sampler(
+            model, ctx_input, tgt_act_input, ctx_act_input, device, 
+            input_size, in_channels, num_steps=num_steps
         )
         
         current_latents = torch.cat([current_latents, new_frame], dim=0)
         current_actions = torch.cat([current_actions, tgt_act_input.unsqueeze(0)], dim=1)
-        current_rewards = torch.cat([current_rewards, pred_r.view(1, 1, 1)], dim=1)
-        if pred_d > 0.05:
-            print(f'Termination: {pred_d}')
-
-        if pred_r > 0.2:
-            print(f'Reward: {pred_r}')
-
-        is_done = (torch.sigmoid(pred_d) > 0.5).long()
-        current_dones = torch.cat([current_dones, is_done.view(1, 1)], dim=1)
         
         if len(current_latents) > context_frames + 5:
             current_latents = current_latents[-context_frames:]
             current_actions = current_actions[:, -context_frames:]
-            current_rewards = current_rewards[:, -context_frames:, :]
-            current_dones = current_dones[:, -context_frames:]
 
         if pixel_space:
             img_tensor = (new_frame[0].detach().cpu() + 1.0) / 2.0
@@ -357,18 +307,6 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
             img_rgb = decode_latent(safe_latent, vae, device)
             img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
 
-        r_val = pred_r.item()
-        d_val = torch.sigmoid(pred_d).item()
-        text = f"R: {r_val:.2f} | D: {d_val:.2f}"
-        
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.2
-        thickness = 1
-        color = (0, 255, 0)
-        pos = (4, 12)
-
-        cv2.putText(img_bgr, text, pos, font, scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
-        cv2.putText(img_bgr, text, pos, font, scale, color, thickness, cv2.LINE_AA)
         out.write(img_bgr)
 
     out.release()
@@ -383,22 +321,20 @@ if __name__ == "__main__":
 
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
-    parser.add_argument('--patch_size', type=int, default=2, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
+    parser.add_argument('--patch_size', type=int, default=8, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of heads')
 
-    parser.add_argument('--denoising_steps', type=int, default=5, help='Number of sampling steps for EDM (default: 50)')
+    parser.add_argument('--denoising_steps', type=int, default=3, help='Number of sampling steps for EDM (default: 50)')
 
     parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to .h5 dataset')
 
     parser.add_argument('--weights_path', type=str, default='mod_dit.pt', help='Path to model weights (denoise mode)')
     parser.add_argument('--output', type=str, default='output.mp4', help='Output video filename')
     parser.add_argument('--rollout_idx', type=int, default=0, help='Rollout index (video mode)')
-    parser.add_argument('--max_frames', type=int, default=1000, help='Number of frames to dream')
-    parser.add_argument('--pixel_space', type=bool, default=False, help='Use if model is trained on pixels (64x64)')
-
-    parser.add_argument('--policy_path', type=str, default='ppo_dream_agent.zip', help='Path to trained PPO agent for dreaming')
+    parser.add_argument('--max_frames', type=int, default=100, help='Number of frames to dream')
+    parser.add_argument('--pixel_space', type=bool, default=True, help='Use if model is trained on pixels (64x64)')
 
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -479,8 +415,6 @@ if __name__ == "__main__":
             device, 
             steps=args.max_frames, 
             pixel_space=args.pixel_space, 
-            num_steps=args.denoising_steps,
-            context_frames=args.context_frames,
-            policy_path=args.policy_path
+            num_steps=args.denoising_steps
         )
     
