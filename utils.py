@@ -42,33 +42,10 @@ def unpatchify(x, channels):
 def inspect_dataset(file_path):
     with h5py.File(file_path, 'r') as f:
         print(f"\nInspecting: {file_path}")
-        print("=" * 60)
-        
+        print("-" * 60)
         for key in f.keys():
             print(f"Key: {key:<12} | Shape: {str(f[key].shape):<18} | Type: {f[key].dtype}")
-
-        if 'terminated' in f:
-            dones = np.array(f['terminated'])
-            total_steps = len(dones)
-            total_episodes = np.sum(dones)
-            
-            print("-" * 60)
-            print(f"Total Steps:    {total_steps}")
-            print(f"Total Episodes: {total_episodes}")
-            
-            if total_episodes > 0:
-                term_indices = np.where(dones)[0]
-                
-                boundaries = np.concatenate(([-1], term_indices))
-                lengths = np.diff(boundaries)
-                
-                print(f"Avg Length:     {np.mean(lengths):.2f}")
-                print(f"Min Length:     {np.min(lengths)}")
-                print(f"Max Length:     {np.max(lengths)}")
-                print(f"Lengths (first 10): {lengths[:10].tolist()}")
-        
-        print("=" * 60)
-        
+        print("-" * 60)
 
 def create_video(dataset_path, output_filename, rollout_idx, vae, device='cuda', pixel_space=False):
     with h5py.File(dataset_path, 'r') as f:
@@ -321,20 +298,20 @@ if __name__ == "__main__":
 
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
-    parser.add_argument('--patch_size', type=int, default=8, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
+    parser.add_argument('--patch_size', type=int, default=2, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of heads')
 
-    parser.add_argument('--denoising_steps', type=int, default=3, help='Number of sampling steps for EDM (default: 50)')
+    parser.add_argument('--denoising_steps', type=int, default=5, help='Number of sampling steps for EDM (default: 50)')
 
-    parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to .h5 dataset')
+    parser.add_argument('--dataset_path', type=str, default='data/atari_dataset.h5', help='Path to .h5 dataset')
 
     parser.add_argument('--weights_path', type=str, default='mod_dit.pt', help='Path to model weights (denoise mode)')
     parser.add_argument('--output', type=str, default='output.mp4', help='Output video filename')
     parser.add_argument('--rollout_idx', type=int, default=0, help='Rollout index (video mode)')
-    parser.add_argument('--max_frames', type=int, default=100, help='Number of frames to dream')
-    parser.add_argument('--pixel_space', type=bool, default=True, help='Use if model is trained on pixels (64x64)')
+    parser.add_argument('--max_frames', type=int, default=500, help='Number of frames to dream')
+    parser.add_argument('--pixel_space', type=bool, default=False, help='Use if model is trained on pixels (64x64)')
 
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"

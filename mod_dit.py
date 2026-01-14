@@ -125,18 +125,18 @@ class ModDiT(nn.Module):
 
         return D_x
 
-def train_mod_dit(dataset_path, num_actions, epochs=10, batch_size=32, val_split=0.1, 
-                 in_channels=4, context_frames=4, hidden_size=384, depth=6, num_heads=6, 
-                 device='cuda', input_size=8, patch_size=2):    
+def train_mod_dit(dataset_path, num_actions, epochs, batch_size, val_split, in_channels, 
+                  context_frames, hidden_size, depth, num_heads, input_size, patch_size, device='cuda'):    
     
-    full_dataset = AtariH5Dataset(dataset_path, context_len=context_frames)
+    full_dataset = AtariH5Dataset(h5_path=dataset_path, context_length=context_frames)
     val_size = int(len(full_dataset) * val_split)
     train_size = len(full_dataset) - val_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
+    # From here on
     P_mean = -1.2
     P_std = 1.2
     sigma_data = 0.5

@@ -1,29 +1,35 @@
 import argparse
 import os
 from diffusers.models import AutoencoderKL
+
 from rollout_gen import env_rollout
+
+### nsnm ###
 from mod_dit import train_mod_dit
 from utils import get_num_actions, DIT_CONFIGS
+### nsnm ###
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train DiT-WM")
     
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Atari environment ID')
+    parser.add_argument('--observation_resolution', type=int, default=64, help='Image resolution of enviroment observations')
     parser.add_argument('--n_steps', type=int, default=10000, help='Total environment steps to collect')
 
     parser.add_argument('--val_split', type=float, default=0.2, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
-    parser.add_argument('--dit_n_epochs', type=int, default=10, help='Training epochs for Dynamics Model')
-    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for DiT training')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for DiT training')
+    parser.add_argument('--dit_n_epochs', type=int, default=50, help='Training epochs for Dynamics Model')
+
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
-    parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
-    parser.add_argument('--patch_size', type=int, default=8, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
+    parser.add_argument('--patch_size', type=int, default=2, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Transformer embedding dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of DiT blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of attention heads')
+    parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
 
-    parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to HDF5 dataset')
-    parser.add_argument('--weights_path', type=str, default='mod_dit.pt', help='Path to model weights (denoise mode)')
+    parser.add_argument('--dataset_path', type=str, default='data/atari_dataset.h5', help='Path to HDF5 dataset')
+    parser.add_argument('--weights_path', type=str, default='weights/mod_dit.pt', help='Path to model weights (denoise mode)')
     
     parser.add_argument('--delete_dataset', action='store_true', default=True, help='If set, deletes existing dataset')
     parser.add_argument('--keep_dataset', action='store_false', dest='delete_dataset', help='Keep existing dataset')
@@ -31,56 +37,83 @@ if __name__ == '__main__':
     parser.add_argument('--delete_dit_weights', action='store_true', default=True, help='If set, deletes existing DiT weights')
     parser.add_argument('--keep_dit_weights', action='store_false', dest='delete_dit_weights', help='Keep existing DiT weights')
     
-    parser.add_argument('--pixel_space', type=bool, default=True, help='If set, trains on 64x64 RGB pixels instead of VAE latents')
+    parser.add_argument('--pixel_space', type=bool, default=False, help='If set, trains on 64x64 RGB pixels instead of VAE latents')
     
     args = parser.parse_args()
 
     ENV_NAME = args.env_name
     NUM_ACTIONS = get_num_actions(ENV_NAME)
+    OBSERVATION_RESOLUTION = args.observation_resolution
     N_STEPS = args.n_steps
-    DIT_EPOCHS = args.dit_n_epochs
     DATASET_PATH = args.dataset_path
+
+    PIXEL_SPACE = args.pixel_space
+
+    VAL_SPLIT = args.val_split
+    BATCH_SIZE = args.batch_size
+    DIT_EPOCHS = args.dit_n_epochs
+
+    MODEL = args.model
+    PATCH_SIZE = args.patch_size
+    HIDDEN_SIZE = args.hidden_size
+    DEPTH = args.depth
+    NUM_HEADS = args.num_heads
+    CONTEXT_FRAMES = args.context_frames
     DIT_WEIGHTS_PATH = args.weights_path
 
-    if args.model:
-        config = DIT_CONFIGS[args.model]
-        print(f"- Using configuration for {args.model}")
-        args.hidden_size = config['hidden_size']
-        args.depth = config['depth']
-        args.num_heads = config['num_heads']
+    DELETE_DATASET = args.delete_dataset
+    DELETE_DIT_WEIGHTS = args.delete_dit_weights
 
-    if args.delete_dataset and os.path.exists(args.dataset_path):
-        os.remove(args.dataset_path)
-        print(f"- Deleted existing dataset: {args.dataset_path}")
+    if MODEL:
+        config = DIT_CONFIGS[MODEL]
+        HIDDEN_SIZE = config['hidden_size']
+        DEPTH = config['depth']
+        NUM_HEADS = config['num_heads']
 
-    if args.delete_dit_weights and os.path.exists(DIT_WEIGHTS_PATH):
+    if DELETE_DATASET and os.path.exists(DATASET_PATH):
+        os.remove(DATASET_PATH)
+
+    if DELETE_DIT_WEIGHTS and os.path.exists(DIT_WEIGHTS_PATH):
         os.remove(DIT_WEIGHTS_PATH)
-        print(f"- Deleted existing Dynamics Model weights: {DIT_WEIGHTS_PATH}")
 
-    if args.pixel_space:
+    if PIXEL_SPACE:
         VAE = None 
-        in_channels = 3
-        input_size = 64
+        IN_CHANNELS = 3
+        INPUT_SIZE = OBSERVATION_RESOLUTION
+        DATA_SHAPE = (IN_CHANNELS, INPUT_SIZE, INPUT_SIZE)
+        DTYPE = 'uint8'
     else:
         VAE = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to('cuda')
-        in_channels = 4
-        input_size = 8
+        IN_CHANNELS = 4
+        INPUT_SIZE = 8
+        DATA_SHAPE = (IN_CHANNELS, INPUT_SIZE, INPUT_SIZE)
+        DTYPE = 'float32'
 
-    env_rollout(ENV_NAME, N_STEPS, VAE, DATASET_PATH, policy_path=None)
+    env_rollout(env_name=ENV_NAME,
+                n_steps=N_STEPS,
+                vae=VAE,
+                dataset_path=DATASET_PATH, 
+                pixel_space=PIXEL_SPACE, 
+                data_shape=DATA_SHAPE, 
+                dtype=DTYPE,
+                resize_resolution=OBSERVATION_RESOLUTION)
+
+    # ### nsnm ###
     train_mod_dit(
-        args.dataset_path, 
+        dataset_path=DATASET_PATH, 
         num_actions=NUM_ACTIONS,
         epochs=DIT_EPOCHS, 
-        batch_size=args.batch_size, 
-        val_split=args.val_split,
-        in_channels=in_channels,
-        context_frames=args.context_frames,
-        hidden_size=args.hidden_size,
-        depth=args.depth,
-        num_heads=args.num_heads,
-        input_size=input_size, 
-        patch_size=args.patch_size
+        batch_size=BATCH_SIZE, 
+        val_split=VAL_SPLIT,
+        in_channels=IN_CHANNELS,
+        context_frames=CONTEXT_FRAMES,
+        hidden_size=HIDDEN_SIZE,
+        depth=DEPTH,
+        num_heads=NUM_HEADS,
+        input_size=INPUT_SIZE, 
+        patch_size=PATCH_SIZE
     )
+    # ### nsnm ###
 
 
 
