@@ -206,7 +206,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
     real_frames = []
     real_actions = []
     for _ in range(context_frames):
-        img = cv2.resize(obs, (64, 64))
+        img = cv2.resize(obs, (128, 128))
         real_frames.append(img)
         
         if agent:
@@ -233,7 +233,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
     current_actions = torch.tensor(real_actions).to(device).long().unsqueeze(0)
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_filename, fourcc, 10.0, (64, 64))
+    out = cv2.VideoWriter(output_filename, fourcc, 10.0, (128, 128))
 
     pbar = tqdm(range(steps))
     for i in pbar:
@@ -260,7 +260,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
 
         tgt_act_input = torch.tensor([next_action_val], device=device).long()
         
-        input_size = 64 if pixel_space else 8
+        input_size = 64 if pixel_space else 16
         in_channels = 3 if pixel_space else 4
         
         new_frame = edm_sampler(
@@ -296,7 +296,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--env_name', type=str, default='ALE/BattleZone-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
-    parser.add_argument('--model', type=str, default='DiT-L', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--patch_size', type=int, default=2, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
@@ -323,7 +323,7 @@ if __name__ == "__main__":
         vae = None
     else:
         in_channels = 4
-        input_size = 8
+        input_size = 16
         vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
 
     if args.model:
