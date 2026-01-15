@@ -19,30 +19,32 @@ class FourierEmbedding(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=1.0):
         super().__init__()
 
-        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = nn.MultiheadAttention(hidden_size, num_heads, batch_first=True)
-        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm1 = nn.LayerNorm(normalized_shape=hidden_size, elementwise_affine=False, eps=1e-6)
+        self.attn = nn.MultiheadAttention(embed_dim=hidden_size, num_heads=num_heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(normalized_shape=hidden_size, elementwise_affine=False, eps=1e-6)
         self.mlp = nn.Sequential(
-            nn.Linear(hidden_size, int(hidden_size * mlp_ratio)),
+            nn.Linear(in_features=hidden_size, out_features=int(hidden_size * mlp_ratio)),
             nn.GELU(),
-            nn.Linear(int(hidden_size * mlp_ratio), hidden_size)
+            nn.Linear(in_features=int(hidden_size * mlp_ratio), out_features=hidden_size)
         )
         self.adaLN_modulation = nn.Sequential(
             nn.SiLU(),
-            nn.Linear(hidden_size, 6 * hidden_size, bias=True)
+            nn.Linear(in_features=hidden_size, out_features=6 * hidden_size, bias=True)
         )
 
     def forward(self, x, c):
         beta_1, gamma_1, alpha_1, beta_2, gamma_2, alpha_2 = self.adaLN_modulation(c).chunk(6, dim=1)
         
-        x_norm = (1 + gamma_1.unsqueeze(1)) * self.norm1(x) + beta_1.unsqueeze(1)
+        # x_norm = (1 + gamma_1.unsqueeze(1)) * self.norm1(x) + beta_1.unsqueeze(1)
+        x_norm = (gamma_1.unsqueeze(1)) * self.norm1(x) + beta_1.unsqueeze(1)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm)
         x = x + alpha_1.unsqueeze(1) * attn_out
         
-        x_norm = (1 + gamma_2.unsqueeze(1)) * self.norm2(x) + beta_2.unsqueeze(1)
+        # x_norm = (1 + gamma_2.unsqueeze(1)) * self.norm2(x) + beta_2.unsqueeze(1)
+        x_norm = (gamma_2.unsqueeze(1)) * self.norm2(x) + beta_2.unsqueeze(1)
         mlp_out = self.mlp(x_norm)
         x = x + alpha_2.unsqueeze(1) * mlp_out
         
@@ -53,56 +55,70 @@ class FinalLayer(nn.Module):
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
 
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.linear = nn.Linear(hidden_size, patch_size * patch_size * out_channels, bias=True)
-        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
+        self.norm_final = nn.LayerNorm(normalized_shape=hidden_size, elementwise_affine=False, eps=1e-6)
+        self.linear = nn.Linear(in_features=hidden_size, out_features=patch_size * patch_size * out_channels, bias=True)
+        # self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(in_features=hidden_size, out_features=2 * hidden_size, bias=True))
 
     def forward(self, x, c):
-        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
-        x = (1 + scale.unsqueeze(1)) * self.norm_final(x) + shift.unsqueeze(1)
+        # shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        # x = (1 + scale.unsqueeze(1)) * self.norm_final(x) + shift.unsqueeze(1)
+        x = self.norm_final(x)
         return self.linear(x)
 
 
 class ModDiT(nn.Module):
-    def __init__(self, num_actions, input_size=8, patch_size=2, in_channels=4, context_frames=4, 
-                 hidden_size=384, depth=6, num_heads=6, sigma_data=0.5):
+    def __init__(self, num_actions, input_size, patch_size, in_channels,
+                  context_frames, hidden_size, depth, num_heads, sigma_data):
         super().__init__()
 
-        self.in_channels = in_channels
+        self.num_actions = num_actions
+        self.input_size = input_size
         self.patch_size = patch_size
-        self.sigma_data = sigma_data
+        self.in_channels = in_channels
         self.context_frames = context_frames
-        total_in_channels = in_channels + (in_channels * context_frames)
-        num_patches = (input_size // patch_size) ** 2
+        self.hidden_size = hidden_size
+        self.depth = depth
+        self.num_heads = num_heads
+        self.sigma_data = sigma_data
 
-        self.x_embedder = nn.Conv2d(total_in_channels, hidden_size, kernel_size=patch_size, stride=patch_size)
-        self.pos_embed = nn.Parameter(torch.randn(1, num_patches, hidden_size) * 0.02, requires_grad=True)
+        self.total_in_channels = self.in_channels + (self.in_channels * self.context_frames)
+        self.num_patches = (self.input_size // self.patch_size) ** 2
+
+        self.x_embedder = nn.Conv2d(in_channels=self.total_in_channels, 
+                                    out_channels=self.hidden_size, 
+                                    kernel_size=self.patch_size, 
+                                    stride=self.patch_size)
+
+        # Removed ze) * 0.02
+        self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches, self.hidden_size), requires_grad=True)
 
         # EDM noise for target
         self.sigma_map = nn.Sequential(
-            FourierEmbedding(256), 
-            nn.Linear(256, hidden_size), 
+            FourierEmbedding(num_channels=256),
+            nn.Linear(in_features=256, out_features=self.hidden_size), 
             nn.SiLU(), 
-            nn.Linear(hidden_size, hidden_size)
+            nn.Linear(in_features=self.hidden_size, out_features=self.hidden_size)
         )
         
-        self.act_embedder = nn.Embedding(num_actions, hidden_size)
-        self.ctx_act_embedder = nn.Embedding(num_actions, hidden_size)
-        self.ctx_act_proj = nn.Linear(hidden_size * context_frames, hidden_size)
+        self.act_embedder = nn.Embedding(num_embeddings=self.num_actions, embedding_dim=self.hidden_size)
+        self.ctx_act_embedder = nn.Embedding(num_embeddings=self.num_actions, embedding_dim=self.hidden_size)
+        self.ctx_act_proj = nn.Linear(in_features=self.hidden_size * context_frames, out_features=self.hidden_size)
 
-        self.blocks = nn.ModuleList([DiTBlock(hidden_size, num_heads) for _ in range(depth)])
-        self.final_layer = FinalLayer(hidden_size, patch_size, in_channels)
+        self.blocks = nn.ModuleList([DiTBlock(hidden_size=self.hidden_size, num_heads=self.num_heads) for _ in range(self.depth)])
+        self.final_layer = FinalLayer(hidden_size=self.hidden_size, patch_size=self.patch_size, out_channels=in_channels)
 
 
     def forward(self, x_noisy, sigma, context, target_action, context_actions):
         # EDM preconditioning
-        c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
-        c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
         c_in = 1 / (sigma ** 2 + self.sigma_data ** 2).sqrt()
+        c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
         c_noise = sigma.log() / 4.0
+        c_skip = self.sigma_data ** 2 / (self.sigma_data ** 2 + sigma ** 2)
+        
         c_in = c_in.view(-1, 1, 1, 1)
-        c_skip = c_skip.view(-1, 1, 1, 1)
         c_out = c_out.view(-1, 1, 1, 1)
+        c_skip = c_skip.view(-1, 1, 1, 1)
+
         F_x = c_in * x_noisy
 
         model_input = torch.cat([F_x, context], dim=1)
@@ -111,8 +127,16 @@ class ModDiT(nn.Module):
         sigma_vec = self.sigma_map(c_noise)
 
         act_vec = self.act_embedder(target_action)
-        ctx_vec = self.ctx_act_proj(self.ctx_act_embedder(context_actions).flatten(1))
-        c = sigma_vec + act_vec + ctx_vec
+        ctx_vec = self.ctx_act_embedder(context_actions)
+        # ctx_vec = self.ctx_act_proj(self.ctx_act_embedder(context_actions).flatten(1))
+        # print(sigma_vec.shape)
+        # print(act_vec.shape)
+        # print(ctx_vec.split(1, dim=1)[0].shape)
+        # c = sigma_vec + act_vec + ctx_vec
+        # c = sigma_vec + self.pos_embed + act_vec + ctx_vec
+        c = sigma_vec + act_vec
+        for ctx_act in ctx_vec.split(1, dim=1):
+            c += ctx_act.squeeze(dim=1)
         
         x = self.x_embedder(model_input).flatten(2).transpose(1, 2)
         x = x + self.pos_embed
@@ -120,7 +144,7 @@ class ModDiT(nn.Module):
             x = block(x, c)
 
         x = self.final_layer(x, c)        
-        F_out = unpatchify(x, self.in_channels)
+        F_out = unpatchify(x=x, channels=self.in_channels)
         D_x = c_skip * x_noisy + c_out * F_out
 
         return D_x
@@ -136,8 +160,8 @@ def train_mod_dit(dataset_path, num_actions, epochs, batch_size, val_split, in_c
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
-    # From here on
-    P_mean = -1.2
+    # P_mean = -1.2
+    P_mean = -0.4
     P_std = 1.2
     sigma_data = 0.5
 
@@ -153,6 +177,7 @@ def train_mod_dit(dataset_path, num_actions, epochs, batch_size, val_split, in_c
         sigma_data=sigma_data
     ).to(device)
 
+    # From here on
     if os.path.exists("dit_wm.pt"):
         model.load_state_dict(torch.load("dit_wm.pt"))
 
@@ -224,3 +249,5 @@ def train_mod_dit(dataset_path, num_actions, epochs, batch_size, val_split, in_c
     print("Training Complete.")
 
 
+if __name__ == '__main__':
+    print(nn.Parameter(torch.randn(1, 16, 384), requires_grad=True))

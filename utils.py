@@ -296,7 +296,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
-    parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--patch_size', type=int, default=2, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
