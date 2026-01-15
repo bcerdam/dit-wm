@@ -294,9 +294,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Atari Dataset Utilities")
     parser.add_argument('mode', choices=['inspect', 'video', 'denoise', 'dream'], help='Select utility function to run')
 
-    parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
+    parser.add_argument('--env_name', type=str, default='ALE/BattleZone-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
-    parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--model', type=str, default='DiT-L', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--patch_size', type=int, default=2, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
@@ -392,6 +392,7 @@ if __name__ == "__main__":
             device, 
             steps=args.max_frames, 
             pixel_space=args.pixel_space, 
-            num_steps=args.denoising_steps
+            num_steps=args.denoising_steps,
+            context_frames=args.context_frames
         )
     
