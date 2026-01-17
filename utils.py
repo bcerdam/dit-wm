@@ -260,7 +260,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
 
         tgt_act_input = torch.tensor([next_action_val], device=device).long()
         
-        input_size = 64 if pixel_space else 16
+        input_size = 128 if pixel_space else 16
         in_channels = 3 if pixel_space else 4
         
         new_frame = edm_sampler(
@@ -294,16 +294,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Atari Dataset Utilities")
     parser.add_argument('mode', choices=['inspect', 'video', 'denoise', 'dream'], help='Select utility function to run')
 
-    parser.add_argument('--env_name', type=str, default='ALE/BattleZone-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
+    parser.add_argument('--env_name', type=str, default='ALE/Boxing-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
-    parser.add_argument('--model', type=str, default='DiT-B', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
     parser.add_argument('--patch_size', type=int, default=2, help='Patch size used in training (default 2 for latent, use 8 for pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Hidden dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of heads')
 
-    parser.add_argument('--denoising_steps', type=int, default=5, help='Number of sampling steps for EDM (default: 50)')
+    parser.add_argument('--denoising_steps', type=int, default=3, help='Number of sampling steps for EDM (default: 50)')
 
     parser.add_argument('--dataset_path', type=str, default='data/atari_dataset.h5', help='Path to .h5 dataset')
 
@@ -319,7 +319,7 @@ if __name__ == "__main__":
 
     if args.pixel_space:
         in_channels = 3
-        input_size = 64
+        input_size = 128
         vae = None
     else:
         in_channels = 4
