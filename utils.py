@@ -49,7 +49,7 @@ def inspect_dataset(file_path):
 
 def create_video(dataset_path, output_filename, rollout_idx, vae, device='cuda', pixel_space=False):
     with h5py.File(dataset_path, 'r') as f:
-        dones = np.array(f['terminated'])
+        dones = np.array(f['termination_status'])
         term_indices = np.where(dones)[0]
         
         if rollout_idx == 0:
@@ -65,7 +65,7 @@ def create_video(dataset_path, output_filename, rollout_idx, vae, device='cuda',
         print(f"Rendering Rollout {rollout_idx}: Steps {start_idx} to {end_idx} ({end_idx - start_idx} frames)")
 
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_filename, fourcc, 30.0, (64, 64))
+        out = cv2.VideoWriter(output_filename, fourcc, 15.0, (128, 128))
         raw_frames = f['observations'][start_idx:end_idx]
         
         for i in tqdm(range(len(raw_frames))):
@@ -294,7 +294,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Atari Dataset Utilities")
     parser.add_argument('mode', choices=['inspect', 'video', 'denoise', 'dream'], help='Select utility function to run')
 
-    parser.add_argument('--env_name', type=str, default='ALE/Boxing-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
+    parser.add_argument('--env_name', type=str, default='ALE/Pong-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')

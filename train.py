@@ -13,13 +13,13 @@ from utils import get_num_actions, DIT_CONFIGS
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train DiT-WM")
     
-    parser.add_argument('--env_name', type=str, default='ALE/Boxing-v5', help='Atari environment ID')
+    parser.add_argument('--env_name', type=str, default='ALE/Pong-v5', help='Atari environment ID')
     parser.add_argument('--observation_resolution', type=int, default=128, help='Image resolution of enviroment observations')
-    parser.add_argument('--n_steps', type=int, default=50000, help='Total environment steps to collect')
+    parser.add_argument('--n_steps', type=int, default=1000, help='Total environment steps to collect')
 
     parser.add_argument('--val_split', type=float, default=0.2, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size for DiT training')
-    parser.add_argument('--dit_n_epochs', type=int, default=50, help='Training epochs for Dynamics Model')
+    parser.add_argument('--dit_n_epochs', type=int, default=1, help='Training epochs for Dynamics Model')
 
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--patch_size', type=int, default=2, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
