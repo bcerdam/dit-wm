@@ -13,13 +13,13 @@ from utils import get_num_actions, DIT_CONFIGS
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train DiT-WM")
     
-    parser.add_argument('--env_name', type=str, default='ALE/Breakout-v5', help='Atari environment ID')
+    parser.add_argument('--env_name', type=str, default='ALE/BattleZone-v5', help='Atari environment ID')
     parser.add_argument('--observation_resolution', type=int, default=64, help='Image resolution of enviroment observations')
-    parser.add_argument('--n_steps', type=int, default=1000, help='Total environment steps to collect')
+    parser.add_argument('--n_steps', type=int, default=50000, help='Total environment steps to collect')
 
     parser.add_argument('--val_split', type=float, default=0.2, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size for DiT training')
-    parser.add_argument('--vae_n_epochs', type=int, default=50, help='Training epochs for VAE')
+    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for DiT training')
+    parser.add_argument('--vae_n_epochs', type=int, default=200, help='Training epochs for VAE')
     parser.add_argument('--dit_n_epochs', type=int, default=50, help='Training epochs for Dynamics Model')
 
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
@@ -32,14 +32,18 @@ if __name__ == '__main__':
     parser.add_argument('--latent_channel_dim', type=int, default=4, help='Channel dimension for latent VAE space')
     parser.add_argument('--latent_spatial_dim', type=int, default=32, help='Spatial dimension for latent VAE space')
 
-    parser.add_argument('--dataset_path', type=str, default='data/atari_dataset.h5', help='Path to HDF5 dataset')
-    parser.add_argument('--weights_path', type=str, default='weights/mod_dit.pt', help='Path to model weights (denoise mode)')
+    parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to HDF5 dataset')
+    parser.add_argument('--dit_weights_path', type=str, default='mod_dit.pt', help='Path to model weights (mod dit model)')
+    parser.add_argument('--vae_weights_path', type=str, default='vae.pt', help='Path to model weights (vae model)')
     
     parser.add_argument('--delete_dataset', action='store_true', default=True, help='If set, deletes existing dataset')
     parser.add_argument('--keep_dataset', action='store_false', dest='delete_dataset', help='Keep existing dataset')
 
     parser.add_argument('--delete_dit_weights', action='store_true', default=True, help='If set, deletes existing DiT weights')
     parser.add_argument('--keep_dit_weights', action='store_false', dest='delete_dit_weights', help='Keep existing DiT weights')
+
+    parser.add_argument('--delete_vae_weights', action='store_true', default=True, help='If set, deletes existing VAE weights')
+    parser.add_argument('--keep_vae_weights', action='store_false', dest='delete_vae_weights', help='Keep existing VAE weights')
     
     parser.add_argument('--pixel_space', type=bool, default=False, help='If set, trains on 64x64 RGB pixels instead of VAE latents')
     
@@ -64,13 +68,15 @@ if __name__ == '__main__':
     DEPTH = args.depth
     NUM_HEADS = args.num_heads
     CONTEXT_FRAMES = args.context_frames
-    DIT_WEIGHTS_PATH = args.weights_path
+    DIT_WEIGHTS_PATH = args.dit_weights_path
+    VAE_WEIGHTS_PATH = args.vae_weights_path
 
     LATENT_CHANNEL_DIM = args.latent_channel_dim
     LATENT_SPATIAL_DIM = args.latent_spatial_dim
 
     DELETE_DATASET = args.delete_dataset
     DELETE_DIT_WEIGHTS = args.delete_dit_weights
+    DELETE_VAE_WEIGHTS = args.delete_vae_weights
 
     if MODEL:
         config = DIT_CONFIGS[MODEL]
@@ -84,6 +90,9 @@ if __name__ == '__main__':
     if DELETE_DIT_WEIGHTS and os.path.exists(DIT_WEIGHTS_PATH):
         os.remove(DIT_WEIGHTS_PATH)
 
+    if DELETE_VAE_WEIGHTS and os.path.exists(VAE_WEIGHTS_PATH):
+        os.remove(VAE_WEIGHTS_PATH)
+
     if PIXEL_SPACE:
         VAE = None 
         IN_CHANNELS = 3
@@ -91,15 +100,14 @@ if __name__ == '__main__':
         DATA_SHAPE = (IN_CHANNELS, INPUT_SIZE, INPUT_SIZE)
         DTYPE = 'uint8'
     else:
-        VAE = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to('cuda')
-        IN_CHANNELS = 4
-        INPUT_SIZE = 8
+        IN_CHANNELS = LATENT_CHANNEL_DIM
+        INPUT_SIZE = LATENT_SPATIAL_DIM
         DATA_SHAPE = (IN_CHANNELS, INPUT_SIZE, INPUT_SIZE)
         DTYPE = 'float32'
 
     env_rollout(env_name=ENV_NAME,
                 n_steps=N_STEPS,
-                vae=VAE,
+                vae_weights_path=VAE_WEIGHTS_PATH,
                 dataset_path=DATASET_PATH, 
                 pixel_space=PIXEL_SPACE, 
                 data_shape=DATA_SHAPE, 

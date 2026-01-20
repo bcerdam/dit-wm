@@ -7,6 +7,7 @@ import cv2
 from tqdm import tqdm
 from diffusers.models import AutoencoderKL
 from vae import decode_latent
+from vae_test import VAE
 from atari_dataset import AtariH5Dataset
 from rollout_gen import env_rollout, process_pixels_only, batch_encode
 import gymnasium as gym
@@ -47,7 +48,16 @@ def inspect_dataset(file_path):
             print(f"Key: {key:<12} | Shape: {str(f[key].shape):<18} | Type: {f[key].dtype}")
         print("-" * 60)
 
-def create_video(dataset_path, output_filename, rollout_idx, vae, device='cuda', pixel_space=False):
+
+def create_video(dataset_path, output_filename, rollout_idx, vae_weights_path, latent_channel_dim,
+                  latent_spatial_dim, observation_resolution, device='cuda', pixel_space=False):
+    
+    vae = VAE(latent_channel_dim=latent_channel_dim, 
+              latent_spatial_dim=latent_spatial_dim, 
+              observation_resolution=observation_resolution).to(device)
+    vae.load_state_dict(torch.load(vae_weights_path, map_location=device))
+    vae.eval()
+
     with h5py.File(dataset_path, 'r') as f:
         dones = np.array(f['termination_status'])
         term_indices = np.where(dones)[0]
@@ -56,37 +66,38 @@ def create_video(dataset_path, output_filename, rollout_idx, vae, device='cuda',
             start_idx = 0
             end_idx = term_indices[0] + 1
         else:
-            if rollout_idx >= len(term_indices):
-                print(f"Error: Rollout {rollout_idx} not found. Total episodes: {len(term_indices)}")
-                return
             start_idx = term_indices[rollout_idx - 1] + 1
             end_idx = term_indices[rollout_idx] + 1
 
-        print(f"Rendering Rollout {rollout_idx}: Steps {start_idx} to {end_idx} ({end_idx - start_idx} frames)")
-
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(output_filename, fourcc, 15.0, (128, 128))
+        print(f"Rendering Rollout {rollout_idx}: Steps {start_idx} to {end_idx}")
         raw_frames = f['observations'][start_idx:end_idx]
-        
-        for i in tqdm(range(len(raw_frames))):
 
-            if pixel_space == True:
-                frame = raw_frames[i]
-                img_hwc = np.transpose(frame, (1, 2, 0)) 
-                
-                if img_hwc.dtype != np.uint8:
-                    img_hwc = img_hwc.astype(np.uint8)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_filename, fourcc, 15.0, (observation_resolution, observation_resolution))
+    
+    for i in tqdm(range(len(raw_frames))):
+        if pixel_space:
+            frame = raw_frames[i]
+            img_hwc = np.transpose(frame, (1, 2, 0)) 
+            img_bgr = cv2.cvtColor(img_hwc, cv2.COLOR_RGB2BGR)
+            out.write(img_bgr)
+        else:
+            frame = raw_frames[i]
+            frame_tensor = torch.from_numpy(frame).float().to(device).unsqueeze(0)
 
-                img_bgr = cv2.cvtColor(img_hwc, cv2.COLOR_RGB2BGR)
-                out.write(img_bgr)
-            else:
-                latent_batch = np.expand_dims(raw_frames[i], axis=0)
-                img = decode_latent(latent_batch, vae, device=device)
-                img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-                out.write(img_bgr)
+            with torch.no_grad():
+                reconstruction = vae.decoder(frame_tensor)
+            
+            img_tensor = reconstruction.squeeze(0).cpu()
+            img_hwc = img_tensor.permute(1, 2, 0).numpy()
+            img_hwc = (img_hwc + 1.0) / 2.0 * 255.0
+            
+            img_uint8 = np.clip(img_hwc, 0, 255).astype(np.uint8)
+            img_bgr = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR)
+            out.write(img_bgr)
 
-        out.release()
-        print(f"Video saved to {output_filename}")
+    out.release()
+    print(f"Video saved to {output_filename}")
 
     
 def visualize_denoising(model, weights_path, output_filename='denoising.mp4', device='cuda', env_name=None, num_steps=50, pixel_space=False):
@@ -206,7 +217,8 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
     real_frames = []
     real_actions = []
     for _ in range(context_frames):
-        img = cv2.resize(obs, (128, 128))
+        # img = cv2.resize(obs, (64, 64))
+        img = cv2.resize(obs, (64, 64), interpolation=cv2.INTER_AREA)
         real_frames.append(img)
         
         if agent:
@@ -233,7 +245,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
     current_actions = torch.tensor(real_actions).to(device).long().unsqueeze(0)
 
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(output_filename, fourcc, 10.0, (128, 128))
+    out = cv2.VideoWriter(output_filename, fourcc, 15.0, (64, 64))
 
     pbar = tqdm(range(steps))
     for i in pbar:
@@ -260,7 +272,7 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
 
         tgt_act_input = torch.tensor([next_action_val], device=device).long()
         
-        input_size = 128 if pixel_space else 16
+        input_size = 64 if pixel_space else 32
         in_channels = 3 if pixel_space else 4
         
         new_frame = edm_sampler(
@@ -281,8 +293,17 @@ def dream_world(model, vae, env_name, output_filename, device, steps=100, pixel_
             img_bgr = cv2.cvtColor((img_np * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
         else:
             safe_latent = torch.nan_to_num(new_frame, nan=0.0).clamp(-10, 10)
-            img_rgb = decode_latent(safe_latent, vae, device)
-            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            # img_rgb = decode_latent(safe_latent, vae, device)
+            # img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+            with torch.no_grad():
+                reconstruction = vae.decoder(safe_latent)
+            
+            img_tensor = reconstruction.squeeze(0).cpu()
+            img_hwc = img_tensor.permute(1, 2, 0).numpy()
+            img_hwc = (img_hwc + 1.0) / 2.0 * 255.0
+            
+            img_uint8 = np.clip(img_hwc, 0, 255).astype(np.uint8)
+            img_bgr = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR)
 
         out.write(img_bgr)
 
@@ -294,7 +315,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Atari Dataset Utilities")
     parser.add_argument('mode', choices=['inspect', 'video', 'denoise', 'dream'], help='Select utility function to run')
 
-    parser.add_argument('--env_name', type=str, default='ALE/Pong-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
+    parser.add_argument('--env_name', type=str, default='ALE/BattleZone-v5', help='Gym Env ID for fresh/honest evaluation (e.g., ALE/Breakout-v5)')
 
     parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--context_frames', type=int, default=4, help='Number of history frames')
@@ -303,11 +324,16 @@ if __name__ == "__main__":
     parser.add_argument('--depth', type=int, default=6, help='Number of blocks')
     parser.add_argument('--num_heads', type=int, default=6, help='Number of heads')
 
+    parser.add_argument('--observation_resolution', type=int, default=64, help='Image resolution of enviroment observations')
+    parser.add_argument('--latent_channel_dim', type=int, default=4, help='Channel dimension for latent VAE space')
+    parser.add_argument('--latent_spatial_dim', type=int, default=32, help='Spatial dimension for latent VAE space')
+
     parser.add_argument('--denoising_steps', type=int, default=3, help='Number of sampling steps for EDM (default: 50)')
 
-    parser.add_argument('--dataset_path', type=str, default='data/atari_dataset.h5', help='Path to .h5 dataset')
+    parser.add_argument('--dataset_path', type=str, default='atari_dataset.h5', help='Path to .h5 dataset')
 
     parser.add_argument('--weights_path', type=str, default='mod_dit.pt', help='Path to model weights (denoise mode)')
+    parser.add_argument('--vae_weights_path', type=str, default='vae.pt', help='Path to the VAE weights')
     parser.add_argument('--output', type=str, default='output.mp4', help='Output video filename')
     parser.add_argument('--rollout_idx', type=int, default=0, help='Rollout index (video mode)')
     parser.add_argument('--max_frames', type=int, default=500, help='Number of frames to dream')
@@ -316,6 +342,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     NUM_ACTIONS = get_num_actions(args.env_name)
+    VAE_WEIGHTS_PATH = args.vae_weights_path
 
     if args.pixel_space:
         in_channels = 3
@@ -323,8 +350,8 @@ if __name__ == "__main__":
         vae = None
     else:
         in_channels = 4
-        input_size = 16
-        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
+        input_size = 32
+        # vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
 
     if args.model:
         config = DIT_CONFIGS[args.model]
@@ -337,8 +364,20 @@ if __name__ == "__main__":
         inspect_dataset(args.dataset_path)
         
     elif args.mode == 'video':
-        vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
-        create_video(args.dataset_path, args.output, args.rollout_idx, vae, device, args.pixel_space)
+        # vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-mse").to(device)
+        vae = VAE(latent_channel_dim=4, latent_spatial_dim=32, observation_resolution=64).to(device)
+        vae.load_state_dict(torch.load(args.vae_weights_path, map_location=device))
+        vae.eval()
+        # create_video(args.dataset_path, args.output, args.rollout_idx, vae, device, args.pixel_space)
+        create_video(dataset_path=args.dataset_path, 
+                     output_filename=args.output,
+                     rollout_idx=args.rollout_idx, 
+                     vae_weights_path=args.vae_weights_path,
+                     latent_channel_dim=args.latent_channel_dim,
+                     latent_spatial_dim=args.latent_spatial_dim,
+                     observation_resolution=args.observation_resolution,
+                     device=device, 
+                     pixel_space=args.pixel_space)
         
     elif args.mode == 'denoise':
         from mod_dit import ModDiT
@@ -383,6 +422,13 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(args.weights_path, map_location=device))
         model.to(device)
         model.eval()
+
+        vae = VAE(latent_channel_dim=args.latent_channel_dim, 
+                  latent_spatial_dim=args.latent_spatial_dim, 
+                  observation_resolution=args.observation_resolution).to(device)
+
+        vae.load_state_dict(torch.load(args.vae_weights_path, map_location=device))
+        vae.eval()
         
         dream_world(
             model, 

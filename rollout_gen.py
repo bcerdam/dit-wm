@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import cv2
 from stable_baselines3.common.atari_wrappers import FireResetEnv
-from vae_test import train_vae
+from vae_test import train_vae, VAE
 
 
 def run_episode(env, resize_resolution):
@@ -31,6 +31,7 @@ def run_episode(env, resize_resolution):
         
     return observations, actions, rewards, termination_status
 
+
 def batch_encode(frames, vae, device):
     batch_np = np.stack(frames)
     
@@ -41,8 +42,8 @@ def batch_encode(frames, vae, device):
         latents_list = []
         for i in range(0, len(t), 256):
             batch = t[i:i+256]
-            dist = vae.encode(batch).latent_dist
-            latents = dist.sample() * 0.18215
+            z_mean, z_log_var = vae.encoder(batch)
+            latents = vae.sampler(z_mean, z_log_var)
             latents_list.append(latents.cpu().numpy())
             
     return np.concatenate(latents_list, axis=0)
@@ -72,8 +73,8 @@ def save_to_h5(dataset_path, obs_data, actions, rewards, termination_status):
         f['termination_status'][current_len:] = np.array(termination_status)
 
 
-def env_rollout(env_name, n_steps, vae, dataset_path, pixel_space, data_shape, dtype,
-                resize_resolution, val_split, batch_size, vae_epochs, latent_channel_dim, latent_spatial_dim):
+def env_rollout(env_name, n_steps, vae_weights_path, dataset_path, pixel_space, data_shape, dtype,
+                resize_resolution, val_split, batch_size, vae_epochs, latent_channel_dim, latent_spatial_dim, device='cuda'):
     gym.register_envs(ale_py)
 
     with h5py.File(dataset_path, 'a') as f:
@@ -109,21 +110,28 @@ def env_rollout(env_name, n_steps, vae, dataset_path, pixel_space, data_shape, d
                   epochs=vae_epochs, 
                   observation_resolution=resize_resolution,
                   latent_channel_dim=latent_channel_dim,
-                  latent_spatial_dim=latent_spatial_dim)
+                  latent_spatial_dim=latent_spatial_dim,
+                  vae_weights_path=vae_weights_path)
 
-    # print(f'Processing and saving {n_steps} steps... (2/3)')
-    # for episode_idx in range(len(all_episodes_observations)):
-    #     if pixel_space:
-    #         data_batch = process_pixels_only(all_episodes_observations[episode_idx])
-    #     else:
-    #         data_batch = batch_encode(all_episodes_observations[episode_idx], vae, vae.device)
+    print(f'Processing and saving {n_steps} steps... (2/3)')
+    for episode_idx in range(len(all_episodes_observations)):
+        if pixel_space:
+            data_batch = process_pixels_only(all_episodes_observations[episode_idx])
+        else:
+            vae = VAE(latent_channel_dim=latent_channel_dim, 
+                      latent_spatial_dim=latent_spatial_dim, 
+                      observation_resolution=resize_resolution).to(device)
+    
+            vae.load_state_dict(torch.load(vae_weights_path, map_location=device))
+            vae.eval()
+            data_batch = batch_encode(all_episodes_observations[episode_idx], vae, device)
         
-    #     save_to_h5(dataset_path, 
-    #                data_batch, 
-    #                all_episodes_actions[episode_idx], 
-    #                all_episodes_rewards[episode_idx], 
-    #                all_episodes_termination_status[episode_idx])
+        save_to_h5(dataset_path, 
+                   data_batch, 
+                   all_episodes_actions[episode_idx], 
+                   all_episodes_rewards[episode_idx], 
+                   all_episodes_termination_status[episode_idx])
         
-    # print(f'Finished data collection (3/3)')
+    print(f'Finished data collection (3/3)')
     
     env.close()

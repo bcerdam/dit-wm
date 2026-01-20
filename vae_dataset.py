@@ -14,4 +14,4 @@ class VAEDataset(Dataset):
 
 
     def __getitem__(self, idx):
-        return torch.permute(self.observations[idx], (2,0 , 1))
+        return torch.permute(self.observations[idx], (2, 0, 1))
