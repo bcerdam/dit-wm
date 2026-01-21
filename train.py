@@ -2,27 +2,28 @@ import argparse
 import os
 from diffusers.models import AutoencoderKL
 
-from rollout_gen import env_rollout
+from rollout_gen import env_rollout, process_observations
+from vae_test import train_vae
 
 ### nsnm ###
 from mod_dit import train_mod_dit
-from utils import get_num_actions, DIT_CONFIGS
+from train_utils import get_num_actions, DIT_CONFIGS
 ### nsnm ###
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Train DiT-WM")
     
-    parser.add_argument('--env_name', type=str, default='ALE/BattleZone-v5', help='Atari environment ID')
+    parser.add_argument('--env_name', type=str, default='ALE/Alien-v5', help='Atari environment ID')
     parser.add_argument('--observation_resolution', type=int, default=64, help='Image resolution of enviroment observations')
-    parser.add_argument('--n_steps', type=int, default=50000, help='Total environment steps to collect')
+    parser.add_argument('--n_steps', type=int, default=1000000, help='Total environment steps to collect')
 
     parser.add_argument('--val_split', type=float, default=0.2, help='Ratio of data used for validation (e.g., 0.1 for 10%)')
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size for DiT training')
-    parser.add_argument('--vae_n_epochs', type=int, default=200, help='Training epochs for VAE')
-    parser.add_argument('--dit_n_epochs', type=int, default=50, help='Training epochs for Dynamics Model')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size for DiT training')
+    parser.add_argument('--vae_n_epochs', type=int, default=0, help='Training epochs for VAE')
+    parser.add_argument('--dit_n_epochs', type=int, default=100, help='Training epochs for Dynamics Model')
 
-    parser.add_argument('--model', type=str, default='DiT-S', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
+    parser.add_argument('--model', type=str, default='DiT-XL', choices=list(DIT_CONFIGS.keys()), help='Standard DiT config')
     parser.add_argument('--patch_size', type=int, default=2, help='Size of image patches (use 2 for Latent, 4 or 8 for Pixel)')
     parser.add_argument('--hidden_size', type=int, default=384, help='Transformer embedding dimension')
     parser.add_argument('--depth', type=int, default=6, help='Number of DiT blocks')
@@ -36,15 +37,10 @@ if __name__ == '__main__':
     parser.add_argument('--dit_weights_path', type=str, default='mod_dit.pt', help='Path to model weights (mod dit model)')
     parser.add_argument('--vae_weights_path', type=str, default='vae.pt', help='Path to model weights (vae model)')
     
-    parser.add_argument('--delete_dataset', action='store_true', default=True, help='If set, deletes existing dataset')
-    parser.add_argument('--keep_dataset', action='store_false', dest='delete_dataset', help='Keep existing dataset')
+    parser.add_argument('--delete_dataset', type=int, default=1, help='0 = Doesnt delete dataset, 1 = deletes dataset')
+    parser.add_argument('--delete_dit_weights', type=int, default=1, help='0 = Doesnt delete dit weights, 1 = deletes dit weights')
+    parser.add_argument('--delete_vae_weights', type=int, default=0, help='0 = Doesnt delete vae weights, 1 = deletes vae weights')
 
-    parser.add_argument('--delete_dit_weights', action='store_true', default=True, help='If set, deletes existing DiT weights')
-    parser.add_argument('--keep_dit_weights', action='store_false', dest='delete_dit_weights', help='Keep existing DiT weights')
-
-    parser.add_argument('--delete_vae_weights', action='store_true', default=True, help='If set, deletes existing VAE weights')
-    parser.add_argument('--keep_vae_weights', action='store_false', dest='delete_vae_weights', help='Keep existing VAE weights')
-    
     parser.add_argument('--pixel_space', type=bool, default=False, help='If set, trains on 64x64 RGB pixels instead of VAE latents')
     
     args = parser.parse_args()
@@ -84,56 +80,82 @@ if __name__ == '__main__':
         DEPTH = config['depth']
         NUM_HEADS = config['num_heads']
 
-    if DELETE_DATASET and os.path.exists(DATASET_PATH):
+    if DELETE_DATASET == 1 and os.path.exists(DATASET_PATH):
         os.remove(DATASET_PATH)
 
-    if DELETE_DIT_WEIGHTS and os.path.exists(DIT_WEIGHTS_PATH):
+    if DELETE_DIT_WEIGHTS == 1 and os.path.exists(DIT_WEIGHTS_PATH):
         os.remove(DIT_WEIGHTS_PATH)
 
-    if DELETE_VAE_WEIGHTS and os.path.exists(VAE_WEIGHTS_PATH):
+    if DELETE_VAE_WEIGHTS == 1 and os.path.exists(VAE_WEIGHTS_PATH):
         os.remove(VAE_WEIGHTS_PATH)
 
     if PIXEL_SPACE:
-        VAE = None 
         IN_CHANNELS = 3
         INPUT_SIZE = OBSERVATION_RESOLUTION
         DATA_SHAPE = (IN_CHANNELS, INPUT_SIZE, INPUT_SIZE)
         DTYPE = 'uint8'
+        vae_required = False
     else:
         IN_CHANNELS = LATENT_CHANNEL_DIM
         INPUT_SIZE = LATENT_SPATIAL_DIM
         DATA_SHAPE = (IN_CHANNELS, INPUT_SIZE, INPUT_SIZE)
         DTYPE = 'float32'
+        vae_required = True
 
-    env_rollout(env_name=ENV_NAME,
-                n_steps=N_STEPS,
-                vae_weights_path=VAE_WEIGHTS_PATH,
-                dataset_path=DATASET_PATH, 
-                pixel_space=PIXEL_SPACE, 
-                data_shape=DATA_SHAPE, 
-                dtype=DTYPE,
-                resize_resolution=OBSERVATION_RESOLUTION,
-                val_split=VAL_SPLIT,
-                batch_size=BATCH_SIZE,
-                vae_epochs=VAE_EPOCHS,
+
+    if DELETE_DATASET == 1:
+        observations, actions, rewards, termination_status = env_rollout(
+                                                                env_name=ENV_NAME,
+                                                                n_steps=N_STEPS,
+                                                                dataset_path=DATASET_PATH, 
+                                                                data_shape=DATA_SHAPE, 
+                                                                dtype=DTYPE,
+                                                                resize_resolution=OBSERVATION_RESOLUTION
+                                                                )
+    
+
+    if vae_required == True and DELETE_VAE_WEIGHTS == 1:
+        train_vae(
+                observations=observations, 
+                val_split=VAL_SPLIT, 
+                batch_size=BATCH_SIZE, 
+                epochs=VAE_EPOCHS, 
+                observation_resolution=OBSERVATION_RESOLUTION,
                 latent_channel_dim=LATENT_CHANNEL_DIM,
-                latent_spatial_dim=LATENT_SPATIAL_DIM)
+                latent_spatial_dim=LATENT_SPATIAL_DIM,
+                vae_weights_path=VAE_WEIGHTS_PATH
+                )
+        
 
+    if DELETE_DATASET == 1:
+        process_observations(n_steps=N_STEPS,
+                            all_episodes_observations=observations,
+                            all_episodes_actions=actions,
+                            all_episodes_rewards=rewards,
+                            all_episodes_termination_status=termination_status,
+                            pixel_space=PIXEL_SPACE,
+                            latent_channel_dim=LATENT_CHANNEL_DIM,
+                            latent_spatial_dim=LATENT_SPATIAL_DIM,
+                            resize_resolution=OBSERVATION_RESOLUTION,
+                            vae_weights_path=VAE_WEIGHTS_PATH,
+                            dataset_path=DATASET_PATH)
+            
+    
     # # ### nsnm ###
-    # train_mod_dit(
-    #     dataset_path=DATASET_PATH, 
-    #     num_actions=NUM_ACTIONS,
-    #     epochs=DIT_EPOCHS, 
-    #     batch_size=BATCH_SIZE, 
-    #     val_split=VAL_SPLIT,
-    #     in_channels=IN_CHANNELS,
-    #     context_frames=CONTEXT_FRAMES,
-    #     hidden_size=HIDDEN_SIZE,
-    #     depth=DEPTH,
-    #     num_heads=NUM_HEADS,
-    #     input_size=INPUT_SIZE, 
-    #     patch_size=PATCH_SIZE
-    # )
+    train_mod_dit(
+        dataset_path=DATASET_PATH, 
+        num_actions=NUM_ACTIONS,
+        epochs=DIT_EPOCHS, 
+        batch_size=BATCH_SIZE, 
+        val_split=VAL_SPLIT,
+        in_channels=IN_CHANNELS,
+        context_frames=CONTEXT_FRAMES,
+        hidden_size=HIDDEN_SIZE,
+        depth=DEPTH,
+        num_heads=NUM_HEADS,
+        input_size=INPUT_SIZE, 
+        patch_size=PATCH_SIZE
+        )
     # # ### nsnm ###
 
 

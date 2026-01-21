@@ -5,7 +5,7 @@ import os
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 from atari_dataset import AtariH5Dataset
-from utils import unpatchify
+from train_utils import unpatchify
 
 
 class FourierEmbedding(nn.Module):
@@ -19,7 +19,7 @@ class FourierEmbedding(nn.Module):
 
 
 class DiTBlock(nn.Module):
-    def __init__(self, hidden_size, num_heads, mlp_ratio=1.0):
+    def __init__(self, hidden_size, num_heads, mlp_ratio=4.0):
         super().__init__()
 
         self.norm1 = nn.LayerNorm(normalized_shape=hidden_size, elementwise_affine=False, eps=1e-6)
@@ -38,13 +38,11 @@ class DiTBlock(nn.Module):
     def forward(self, x, c):
         beta_1, gamma_1, alpha_1, beta_2, gamma_2, alpha_2 = self.adaLN_modulation(c).chunk(6, dim=1)
         
-        # x_norm = (1 + gamma_1.unsqueeze(1)) * self.norm1(x) + beta_1.unsqueeze(1)
-        x_norm = (gamma_1.unsqueeze(1)) * self.norm1(x) + beta_1.unsqueeze(1)
+        x_norm = (1 + gamma_1.unsqueeze(1)) * self.norm1(x) + beta_1.unsqueeze(1)
         attn_out, _ = self.attn(x_norm, x_norm, x_norm)
         x = x + alpha_1.unsqueeze(1) * attn_out
         
-        # x_norm = (1 + gamma_2.unsqueeze(1)) * self.norm2(x) + beta_2.unsqueeze(1)
-        x_norm = (gamma_2.unsqueeze(1)) * self.norm2(x) + beta_2.unsqueeze(1)
+        x_norm = (1 + gamma_2.unsqueeze(1)) * self.norm2(x) + beta_2.unsqueeze(1)
         mlp_out = self.mlp(x_norm)
         x = x + alpha_2.unsqueeze(1) * mlp_out
         
@@ -57,12 +55,11 @@ class FinalLayer(nn.Module):
 
         self.norm_final = nn.LayerNorm(normalized_shape=hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = nn.Linear(in_features=hidden_size, out_features=patch_size * patch_size * out_channels, bias=True)
-        # self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(in_features=hidden_size, out_features=2 * hidden_size, bias=True))
+        self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(in_features=hidden_size, out_features=2 * hidden_size, bias=True))
 
     def forward(self, x, c):
-        # shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
-        # x = (1 + scale.unsqueeze(1)) * self.norm_final(x) + shift.unsqueeze(1)
-        x = self.norm_final(x)
+        shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
+        x = (1 + scale.unsqueeze(1)) * self.norm_final(x) + shift.unsqueeze(1)
         return self.linear(x)
 
 
@@ -89,10 +86,8 @@ class ModDiT(nn.Module):
                                     kernel_size=self.patch_size, 
                                     stride=self.patch_size)
 
-        # Removed ze) * 0.02
-        self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches, self.hidden_size), requires_grad=True)
+        self.pos_embed = nn.Parameter(torch.randn(1, self.num_patches, self.hidden_size) * 0.02, requires_grad=True)
 
-        # EDM noise for target
         self.sigma_map = nn.Sequential(
             FourierEmbedding(num_channels=256),
             nn.Linear(in_features=256, out_features=self.hidden_size), 
@@ -109,7 +104,6 @@ class ModDiT(nn.Module):
 
 
     def forward(self, x_noisy, sigma, context, target_action, context_actions):
-        # EDM preconditioning
         c_in = 1 / (sigma ** 2 + self.sigma_data ** 2).sqrt()
         c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
         c_noise = sigma.log() / 4.0
@@ -123,20 +117,11 @@ class ModDiT(nn.Module):
 
         model_input = torch.cat([F_x, context], dim=1)
 
-        # EDM Noise mapping
         sigma_vec = self.sigma_map(c_noise)
 
         act_vec = self.act_embedder(target_action)
-        ctx_vec = self.ctx_act_embedder(context_actions)
-        # ctx_vec = self.ctx_act_proj(self.ctx_act_embedder(context_actions).flatten(1))
-        # print(sigma_vec.shape)
-        # print(act_vec.shape)
-        # print(ctx_vec.split(1, dim=1)[0].shape)
-        # c = sigma_vec + act_vec + ctx_vec
-        # c = sigma_vec + self.pos_embed + act_vec + ctx_vec
-        c = sigma_vec + act_vec
-        for ctx_act in ctx_vec.split(1, dim=1):
-            c += ctx_act.squeeze(dim=1)
+        ctx_vec = self.ctx_act_proj(self.ctx_act_embedder(context_actions).flatten(1))
+        c = sigma_vec + act_vec + ctx_vec
         
         x = self.x_embedder(model_input).flatten(2).transpose(1, 2)
         x = x + self.pos_embed
@@ -149,6 +134,7 @@ class ModDiT(nn.Module):
 
         return D_x
 
+
 def train_mod_dit(dataset_path, num_actions, epochs, batch_size, val_split, in_channels, 
                   context_frames, hidden_size, depth, num_heads, input_size, patch_size, device='cuda'):    
     
@@ -157,11 +143,10 @@ def train_mod_dit(dataset_path, num_actions, epochs, batch_size, val_split, in_c
     train_size = len(full_dataset) - val_size
     train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=4)
 
-    # P_mean = -1.2
-    P_mean = -0.4
+    P_mean = -1.2
     P_std = 1.2
     sigma_data = 0.5
 
@@ -177,7 +162,6 @@ def train_mod_dit(dataset_path, num_actions, epochs, batch_size, val_split, in_c
         sigma_data=sigma_data
     ).to(device)
 
-    # From here on
     if os.path.exists("dit_wm.pt"):
         model.load_state_dict(torch.load("dit_wm.pt"))
 
@@ -247,7 +231,3 @@ def train_mod_dit(dataset_path, num_actions, epochs, batch_size, val_split, in_c
         print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.5f} | Val Loss: {avg_val_loss:.5f} {save_msg}")
 
     print("Training Complete.")
-
-
-if __name__ == '__main__':
-    print(nn.Parameter(torch.randn(1, 16, 384), requires_grad=True))

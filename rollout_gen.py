@@ -73,8 +73,7 @@ def save_to_h5(dataset_path, obs_data, actions, rewards, termination_status):
         f['termination_status'][current_len:] = np.array(termination_status)
 
 
-def env_rollout(env_name, n_steps, vae_weights_path, dataset_path, pixel_space, data_shape, dtype,
-                resize_resolution, val_split, batch_size, vae_epochs, latent_channel_dim, latent_spatial_dim, device='cuda'):
+def env_rollout(env_name, n_steps, dataset_path, data_shape, dtype, resize_resolution):
     gym.register_envs(ale_py)
 
     with h5py.File(dataset_path, 'a') as f:
@@ -102,17 +101,13 @@ def env_rollout(env_name, n_steps, vae_weights_path, dataset_path, pixel_space, 
         collected_steps += step_len
         rollout_idx += 1
 
-    if pixel_space == False:
-        print(f'Training VAE with {n_steps} frames...')
-        train_vae(observations=all_episodes_observations, 
-                  val_split=val_split, 
-                  batch_size=batch_size, 
-                  epochs=vae_epochs, 
-                  observation_resolution=resize_resolution,
-                  latent_channel_dim=latent_channel_dim,
-                  latent_spatial_dim=latent_spatial_dim,
-                  vae_weights_path=vae_weights_path)
+    env.close()
+    return all_episodes_observations, all_episodes_actions, all_episodes_rewards, all_episodes_termination_status
 
+    
+def process_observations(n_steps, all_episodes_observations, all_episodes_actions, all_episodes_rewards, all_episodes_termination_status, pixel_space,
+                         latent_channel_dim, latent_spatial_dim, resize_resolution, vae_weights_path, dataset_path, device='cuda'):
+    
     print(f'Processing and saving {n_steps} steps... (2/3)')
     for episode_idx in range(len(all_episodes_observations)):
         if pixel_space:
@@ -131,7 +126,4 @@ def env_rollout(env_name, n_steps, vae_weights_path, dataset_path, pixel_space, 
                    all_episodes_actions[episode_idx], 
                    all_episodes_rewards[episode_idx], 
                    all_episodes_termination_status[episode_idx])
-        
     print(f'Finished data collection (3/3)')
-    
-    env.close()
