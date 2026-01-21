@@ -5,7 +5,7 @@ import argparse
 import numpy as np
 import cv2
 from tqdm import tqdm
-from vae_test import VAE
+from vae import VAE
 from atari_dataset import AtariH5Dataset
 from rollout_gen import env_rollout, process_pixels_only, batch_encode, process_observations
 import gymnasium as gym

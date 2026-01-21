@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import cv2
 from stable_baselines3.common.atari_wrappers import FireResetEnv
-from vae_test import train_vae, VAE
+from vae import train_vae, VAE
 
 
 def run_episode(env, resize_resolution):

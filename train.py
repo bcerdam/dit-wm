@@ -3,7 +3,7 @@ import os
 from diffusers.models import AutoencoderKL
 
 from rollout_gen import env_rollout, process_observations
-from vae_test import train_vae
+from vae import train_vae
 
 ### nsnm ###
 from mod_dit import train_mod_dit
